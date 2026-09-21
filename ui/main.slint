@@ -1,0 +1,366 @@
+import { ComboBox, Slider, CheckBox, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+component AppleButton inherits Rectangle {
+    in-out property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> filled: false;
+    in property <bool> destructive: false;
+    callback clicked();
+
+    border-radius: 10px;
+    height: 36px;
+    min-width: 72px;
+    background: !root.enabled ? #F2F2F7 : (root.destructive ? #FF3B30 : (root.filled ? #007AFF : #F2F2F7));
+    clip: true;
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        alignment: center;
+        Text {
+            text: root.text;
+            color: !root.enabled ? #AEAEB2 : ((root.filled || root.destructive) ? #FFFFFF : #007AFF);
+            font-size: 14px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    states [
+        pressed when ta.pressed && root.enabled: {
+            opacity: 0.72;
+        }
+    ]
+}
+
+component StatusDot inherits Rectangle {
+    in property <bool> on: false;
+    width: 8px;
+    height: 8px;
+    border-radius: 4px;
+    background: root.on ? #34C759 : #C7C7CC;
+}
+
+component Voiceprint inherits Rectangle {
+    in property <[float]> samples;
+    in property <color> tint: #007AFF;
+    height: 40px;
+    background: #F2F2F7;
+    border-radius: 10px;
+    clip: true;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        spacing: 2px;
+        alignment: stretch;
+        for s in root.samples: Rectangle {
+            horizontal-stretch: 1;
+            border-radius: 1px;
+            height: max(2px, (parent.height - 12px) * min(1, max(0, s)));
+            y: (parent.height - self.height) / 2;
+            background: root.tint;
+            opacity: 0.25 + min(1, max(0, s)) * 0.75;
+        }
+    }
+}
+
+component Group inherits Rectangle {
+    background: #FFFFFF;
+    border-radius: 16px;
+    border-width: 1px;
+    border-color: #E5E5EA;
+}
+
+export component MainWindow inherits Window {
+    title: "ProcessMic";
+    min-width: 980px;
+    min-height: 480px;
+    preferred-width: 1120px;
+    preferred-height: 560px;
+    background: #F5F5F7;
+    default-font-family: "Segoe UI Variable Text";
+    default-font-size: 14px;
+
+    in-out property <[string]> processes: [];
+    in-out property <int> process-index: 0;
+    in-out property <[string]> mics: [];
+    in-out property <int> mic-index: 0;
+    in-out property <[string]> devices: [];
+    in-out property <int> device-index: 0;
+    in-out property <string> dest-hint: "输出列表是虚拟扬声器和虚拟麦克风。";
+    in-out property <bool> show-set-default-mic: false;
+    in-out property <bool> set-default-mic: false;
+    in-out property <float> volume: 100;
+    in-out property <float> mic-volume: 100;
+    in-out property <string> status-text: "未运行";
+    in-out property <bool> running: false;
+    in-out property <string> error-text: "";
+    in-out property <[float]> capture-wave: [];
+    in-out property <[float]> mic-wave: [];
+    in-out property <[float]> render-wave: [];
+    in-out property <float> capture-level: 0;
+    in-out property <float> mic-level: 0;
+    in-out property <float> render-level: 0;
+    in-out property <bool> cable-installed: false;
+    in-out property <bool> cable-busy: false;
+    in-out property <string> cable-text: "未检测到 VB-CABLE";
+    in-out property <string> hotkey-label: "Ctrl+Shift+F8";
+    in-out property <bool> listening-hotkey: false;
+
+    callback start-stop();
+    callback refresh();
+    callback volume-edited(float);
+    callback mic-volume-edited(float);
+    callback install-cable();
+    callback begin-hotkey-capture();
+    callback reset-hotkey();
+    callback hotkey-captured(string, bool, bool, bool);
+
+    FocusScope {
+        key-pressed(event) => {
+            if (root.listening-hotkey) {
+                root.hotkey-captured(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt);
+                accept
+            } else {
+                reject
+            }
+        }
+
+        VerticalBox {
+            padding: 20px;
+            spacing: 14px;
+
+            HorizontalBox {
+                spacing: 12px;
+                alignment: stretch;
+                Text {
+                    text: "ProcessMic";
+                    font-size: 28px;
+                    font-weight: 700;
+                    color: #1D1D1F;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; background: transparent; }
+                Rectangle {
+                    background: root.cable-installed ? #E8F8ED : #F2F2F7;
+                    border-radius: 18px;
+                    border-width: 1px;
+                    border-color: root.cable-installed ? #C6E8D0 : #E5E5EA;
+                    VerticalBox {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        padding-top: 6px;
+                        padding-bottom: 6px;
+                        spacing: 4px;
+                        alignment: center;
+                        Text {
+                            text: root.cable-installed ? "VB-CABLE 已安装" : root.cable-text;
+                            color: root.cable-installed ? #248A3D : #6E6E73;
+                            font-size: 12px;
+                            font-weight: 600;
+                        }
+                        if !root.cable-installed: AppleButton {
+                            text: root.cable-busy ? "安装中…" : "安装 VB-CABLE";
+                            enabled: !root.cable-busy;
+                            clicked => { root.install-cable(); }
+                        }
+                    }
+                }
+            }
+
+            HorizontalBox {
+                spacing: 12px;
+
+                Group {
+                    horizontal-stretch: 1;
+                    VerticalBox {
+                        padding: 16px;
+                        spacing: 10px;
+                        HorizontalBox {
+                            Text {
+                                text: "进程音频";
+                                color: #6E6E73;
+                                font-size: 12px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { horizontal-stretch: 1; background: transparent; }
+                            StatusDot { on: root.capture-level > 0.02; y: 4px; }
+                            Text {
+                                text: root.running ? "捕获中" : "未捕获";
+                                color: root.capture-level > 0.02 ? #248A3D : #6E6E73;
+                                font-size: 12px;
+                            }
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            ComboBox {
+                                horizontal-stretch: 1;
+                                model: root.processes;
+                                current-index <=> root.process-index;
+                                enabled: !root.running;
+                            }
+                            AppleButton {
+                                text: "刷新";
+                                enabled: !root.running && !root.cable-busy;
+                                clicked => { root.refresh(); }
+                            }
+                        }
+                        Voiceprint { samples: root.capture-wave; tint: #30D158; }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "音量"; color: #6E6E73; font-size: 12px; vertical-alignment: center; width: 36px; }
+                            Slider {
+                                horizontal-stretch: 1;
+                                minimum: 0;
+                                maximum: 100;
+                                value <=> root.volume;
+                                changed(v) => { root.volume-edited(v); }
+                            }
+                            Text { width: 40px; text: "\{Math.round(root.volume)}%"; color: #1D1D1F; font-weight: 600; }
+                        }
+                    }
+                }
+
+                Group {
+                    horizontal-stretch: 1;
+                    VerticalBox {
+                        padding: 16px;
+                        spacing: 10px;
+                        HorizontalBox {
+                            Text {
+                                text: "物理麦";
+                                color: #6E6E73;
+                                font-size: 12px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { horizontal-stretch: 1; background: transparent; }
+                            StatusDot { on: root.mic-level > 0.02; y: 4px; }
+                            Text {
+                                text: root.mic-index == 0 ? "未混入" : (root.running ? "混入中" : "待命");
+                                color: root.mic-level > 0.02 ? #007AFF : #6E6E73;
+                                font-size: 12px;
+                            }
+                        }
+                        ComboBox {
+                            model: root.mics;
+                            current-index <=> root.mic-index;
+                            enabled: !root.running;
+                        }
+                        Voiceprint { samples: root.mic-wave; tint: #007AFF; }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "音量"; color: #6E6E73; font-size: 12px; vertical-alignment: center; width: 36px; }
+                            Slider {
+                                horizontal-stretch: 1;
+                                minimum: 0;
+                                maximum: 100;
+                                value <=> root.mic-volume;
+                                enabled: root.mic-index != 0;
+                                changed(v) => { root.mic-volume-edited(v); }
+                            }
+                            Text { width: 40px; text: "\{Math.round(root.mic-volume)}%"; color: #1D1D1F; font-weight: 600; }
+                        }
+                    }
+                }
+
+                Group {
+                    horizontal-stretch: 1;
+                    VerticalBox {
+                        padding: 16px;
+                        spacing: 10px;
+                        HorizontalBox {
+                            Text {
+                                text: "输出";
+                                color: #6E6E73;
+                                font-size: 12px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { horizontal-stretch: 1; background: transparent; }
+                            StatusDot { on: root.render-level > 0.02; y: 4px; }
+                            Text {
+                                text: root.running ? "输出中" : "未渲染";
+                                color: root.render-level > 0.02 ? #007AFF : #6E6E73;
+                                font-size: 12px;
+                            }
+                        }
+                        ComboBox {
+                            model: root.devices;
+                            current-index <=> root.device-index;
+                            enabled: !root.running;
+                        }
+                        Voiceprint { samples: root.render-wave; tint: #5856D6; }
+                        if root.show-set-default-mic: CheckBox {
+                            text: "设为系统默认麦克风（停止后恢复）";
+                            checked <=> root.set-default-mic;
+                            enabled: !root.running;
+                        }
+                        Text {
+                            text: root.dest-hint;
+                            color: #6E6E73;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+
+            if root.error-text != "": Text {
+                text: root.error-text;
+                color: #FF3B30;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+
+            Group {
+                VerticalBox {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    padding-top: 10px;
+                    padding-bottom: 10px;
+                    HorizontalBox {
+                        spacing: 8px;
+                        Text { text: "快捷键"; color: #6E6E73; font-size: 12px; font-weight: 600; vertical-alignment: center; }
+                        Text {
+                            text: root.listening-hotkey ? "按下新快捷键…" : root.hotkey-label;
+                            color: #1D1D1F;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                        AppleButton {
+                            text: "更改";
+                            enabled: !root.running;
+                            clicked => { root.begin-hotkey-capture(); }
+                        }
+                        AppleButton {
+                            text: "重置";
+                            enabled: !root.running;
+                            clicked => { root.reset-hotkey(); }
+                        }
+                        Rectangle { horizontal-stretch: 1; background: transparent; }
+                        StatusDot { on: root.running; y: 14px; }
+                        Text { text: root.status-text; color: #1D1D1F; vertical-alignment: center; }
+                        AppleButton {
+                            text: root.running ? "停止" : "开始转发";
+                            filled: !root.running;
+                            destructive: root.running;
+                            enabled: !root.cable-busy;
+                            clicked => { root.start-stop(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

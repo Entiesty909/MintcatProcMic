@@ -4,3 +4,7 @@ obj
 data
 /.vs
 .DS_Store
+/target
+/target-relink
+/capture.wav
+*.pdb
