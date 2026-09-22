@@ -1,12 +1,18 @@
-//! 播放器页：骨架阶段只有空态。本地 mp3 / mp4 / wav 播放与进度控制在后续阶段实装。
+//! 播放器页：输入本地文件路径，送入当前输出的 SFX 总线。
 
+import { LineEdit, CheckBox } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Card } from "../components/card.slint";
-import { EmptyState } from "../components/empty-state.slint";
+import { PmButton } from "../components/button.slint";
 
 export component PlayerPage inherits Rectangle {
     in-out property <string> output-name: "";
+    in-out property <string> file-path: "";
+    in-out property <bool> loop: false;
+    in-out property <bool> playing: false;
 
+    callback file-path-edited(string);
+    callback play-stop();
     callback open-settings();
 
     background: transparent;
@@ -16,13 +22,53 @@ export component PlayerPage inherits Rectangle {
         spacing: Theme.gapLg;
 
         Card {
-            vertical-stretch: 1;
-            EmptyState {
-                title: "播放器还没实装";
-                hint: "规划中的行为：拖入本地 mp3 / mp4 / m4a / wav / flac，直接把声音转发到当前输出设备，带进度、循环、暂停与热键。";
-                action-label: "去看输出设置";
-                acted => { root.open-settings(); }
+            VerticalLayout {
+                vertical-stretch: 0;
+                Text { text: "本地文件转发"; color: Theme.text2; font-size: 12px; font-weight: 600; }
+                Text {
+                    text: "支持 WAV，以及系统 Media Foundation 能解码的 MP3 / MP4 / M4A / FLAC / WMA。只读取音轨，不播放视频画面。";
+                    color: Theme.text3;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    LineEdit {
+                        horizontal-stretch: 1;
+                        placeholder-text: "粘贴本地音频或 MP4 路径…";
+                        text <=> root.file-path;
+                        edited(t) => { root.file-path-edited(t); }
+                    }
+                    PmButton {
+                        label: root.playing ? "停止" : "播放到麦克风";
+                        filled: !root.playing;
+                        danger: root.playing;
+                        clicked => { root.play-stop(); }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 12px;
+                    CheckBox { text: "循环播放"; checked <=> root.loop; }
+                    Text {
+                        text: root.output-name == "" ? "请先在路由页开始转发" : "输出：" + root.output-name;
+                        color: Theme.text2;
+                        font-size: 12px;
+                        vertical-alignment: TextVerticalAlignment.center;
+                    }
+                }
             }
+        }
+
+        Card {
+            vertical-stretch: 1;
+            Text { text: "播放时按键在设置页配置"; color: Theme.text; font-size: 15px; font-weight: 600; }
+            Text {
+                text: "这里的动作是全局播放行为：不按键、播放开始时按一次，或播放期间保持按下。适合游戏 PTT；默认关闭，启用模拟输入前会显示风险提示。";
+                color: Theme.text2;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+            PmButton { label: "去设置"; clicked => { root.open-settings(); } }
         }
     }
 }

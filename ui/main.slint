@@ -40,7 +40,9 @@ export component MainWindow inherits Window {
     in-out property <float> mic-volume: 100;
     in-out property <bool> has-mic: false;
     in-out property <string> mic-name: "";
-
+    in-out property <string> player-file-path: "";
+    in-out property <bool> player-loop: false;
+    in-out property <bool> player-playing: false;
     // 设备
     in-out property <[string]> devices: [];
     in-out property <int> device-index: 0;
@@ -73,11 +75,10 @@ export component MainWindow inherits Window {
     callback process-filter-changed(string);
     callback all-devices-toggled(bool);
     callback set-default-mic-toggled(bool);
+    callback hotkey-captured(string, bool, bool, bool);
     callback install-cable();
     callback begin-hotkey-capture();
     callback reset-hotkey();
-    callback hotkey-captured(string, bool, bool, bool);
-
     FocusScope {
         key-pressed(event) => {
             if (root.listening-hotkey) {
@@ -179,9 +180,13 @@ export component MainWindow inherits Window {
                     min-width: 0px;
                     min-height: 0px;
                     output-name <=> root.output-name;
+                    file-path <=> root.player-file-path;
+                    loop <=> root.player-loop;
+                    playing <=> root.player-playing;
+                    file-path-edited(t) => { root.player-file-path = t; }
+                    play-stop => { root.start-stop(); }
                     open-settings => { root.page = 3; }
                 }
-
                 if root.page == 3: SettingsPage {
                     width: 100%;
                     height: 100%;
