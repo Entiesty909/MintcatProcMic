@@ -16,42 +16,13 @@ use crate::error::Error;
 
 use super::com;
 
-/// 一个可被选中的输出设备。
+/// 一只物理播放设备：友好名称 + 设备 ID。
 #[derive(Clone, Debug)]
 pub struct RenderDevice {
     /// WASAPI 设备 ID（不是 MME 下标）。
     pub id: String,
     /// 友好名称（用户改名后就是新名字）。
     pub name: String,
-    /// 是否为 eConsole 默认渲染设备。
-    pub is_default: bool,
-}
-
-impl RenderDevice {
-    /// ComboBox 文案。默认设备加标记。
-    pub fn label(&self) -> String {
-        if self.is_default {
-            format!("{}  (默认)", self.name)
-        } else {
-            self.name.clone()
-        }
-    }
-}
-
-/// 列出活动渲染设备，默认设备排第一。
-pub fn list_render_devices() -> Result<Vec<RenderDevice>, Error> {
-    Ok(list_endpoints(eRender, eConsole)?
-        .into_iter()
-        .map(Endpoint::into_render)
-        .collect())
-}
-
-/// 列出活动录音设备（麦克风）。
-pub fn list_capture_devices() -> Result<Vec<RenderDevice>, Error> {
-    Ok(list_endpoints(eCapture, eCommunications)?
-        .into_iter()
-        .map(Endpoint::into_render)
-        .collect())
 }
 
 /// 物理麦克风：排除虚拟线缆录音端，避免把 CABLE Output 再混进去。
@@ -61,44 +32,6 @@ pub fn list_physical_mics() -> Result<Vec<RenderDevice>, Error> {
         .filter(|d| !is_virtual_driver(d))
         .map(Endpoint::into_render)
         .collect())
-}
-
-/// 浏览器 → CABLE Input → CABLE Output → 游戏麦。
-#[derive(Clone, Debug)]
-pub struct VirtualMicRoute {
-    /// 我们 WASAPI 渲染到的设备（CABLE Input）。
-    pub render_id: String,
-    /// 渲染端显示名。
-    pub render_name: String,
-    /// 游戏应选用的麦克风（CABLE Output）。
-    pub capture_id: String,
-    /// 麦克风显示名。
-    pub capture_name: String,
-}
-
-impl VirtualMicRoute {
-    /// ComboBox：虚拟线缆名 + 游戏里要选的麦。
-    pub fn label(&self) -> String {
-        format!("{}  →  游戏麦 {}", self.render_name, self.capture_name)
-    }
-}
-
-/// 按驱动配对虚拟线缆，不看用户改过的友好名称。
-pub fn list_virtual_mic_routes() -> Result<Vec<VirtualMicRoute>, Error> {
-    let renders = list_endpoints(eRender, eConsole)?;
-    let captures = list_endpoints(eCapture, eCommunications)?;
-    let mut routes = Vec::new();
-    for render in &renders {
-        if let Some(capture) = paired_capture(render, &captures) {
-            routes.push(VirtualMicRoute {
-                render_id: render.id.clone(),
-                render_name: render.name.clone(),
-                capture_id: capture.id.clone(),
-                capture_name: capture.name.clone(),
-            });
-        }
-    }
-    Ok(routes)
 }
 
 /// UI 输出列表里的一项。
@@ -114,14 +47,15 @@ pub struct DestDevice {
     pub capture_name: Option<String>,
 }
 
-/// 输出列表：所有虚拟扬声器和虚拟麦克风，各自一条，不做「扬声器 → 麦」拼接。
-pub fn list_destinations() -> Result<Vec<DestDevice>, Error> {
+/// 输出列表：虚拟扬声器与虚拟麦克风各一条，不做「扬声器 → 麦」拼接。
+/// `include_all` 为真时把物理播放设备也一并列出（设置页的开关）。
+pub fn list_destinations(include_all: bool) -> Result<Vec<DestDevice>, Error> {
     let renders = list_endpoints(eRender, eConsole)?;
     let captures = list_endpoints(eCapture, eCommunications)?;
     let mut out = Vec::new();
 
     for r in &renders {
-        if !is_virtual_driver(r) {
+        if !include_all && !is_virtual_driver(r) {
             continue;
         }
         out.push(DestDevice {
@@ -175,7 +109,6 @@ impl Endpoint {
         RenderDevice {
             id: self.id,
             name: self.name,
-            is_default: self.is_default,
         }
     }
 }
@@ -221,31 +154,6 @@ fn default_endpoint_id(flow: EDataFlow, role: ERole) -> Result<String, Error> {
         let device = enumerator.GetDefaultAudioEndpoint(flow, role)?;
         device_id(&device)
     }
-}
-
-fn paired_capture<'a>(render: &Endpoint, captures: &'a [Endpoint]) -> Option<&'a Endpoint> {
-    if !is_virtual_driver(render) {
-        return None;
-    }
-    let mut same: Vec<&Endpoint> = captures
-        .iter()
-        .filter(|c| is_virtual_driver(c) && same_driver(render, c))
-        .collect();
-    if same.is_empty() {
-        return None;
-    }
-    if same.len() == 1 {
-        return Some(same[0]);
-    }
-    if let Some(c) = same
-        .iter()
-        .copied()
-        .find(|c| complementary(&render.desc, &c.desc))
-    {
-        return Some(c);
-    }
-    same.sort_by(|a, b| a.name.cmp(&b.name));
-    Some(same[0])
 }
 
 fn paired_render<'a>(capture: &Endpoint, renders: &'a [Endpoint]) -> Option<&'a Endpoint> {

@@ -1,0 +1,39 @@
+//! 一行「标签 + 滑条 + 百分比」。滑条值双向绑定，改动通过 edited 回调上报。
+
+import { Slider } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+
+export component SliderRow inherits HorizontalLayout {
+    in property <string> label: "";
+    in property <bool> enabled: true;
+    in-out property <float> value: 100;
+    callback edited(float);
+
+    height: Theme.controlHeight;
+    spacing: 8px;
+
+    Text {
+        text: root.label;
+        color: root.enabled ? Theme.text2 : Theme.text3;
+        font-size: 13px;
+        vertical-alignment: TextVerticalAlignment.center;
+        width: 72px;
+    }
+    Slider {
+        horizontal-stretch: 1;
+        minimum: 0;
+        maximum: 100;
+        value <=> root.value;
+        enabled: root.enabled;
+        changed(v) => { root.edited(v); }
+    }
+    Text {
+        width: 44px;
+        text: "\{Math.round(root.value)}%";
+        color: root.enabled ? Theme.text : Theme.text3;
+        font-size: 13px;
+        font-weight: 600;
+        horizontal-alignment: right;
+        vertical-alignment: TextVerticalAlignment.center;
+    }
+}

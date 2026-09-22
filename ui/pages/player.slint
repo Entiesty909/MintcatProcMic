@@ -1,0 +1,28 @@
+//! 播放器页：骨架阶段只有空态。本地 mp3 / mp4 / wav 播放与进度控制在后续阶段实装。
+
+import { Theme } from "../theme.slint";
+import { Card } from "../components/card.slint";
+import { EmptyState } from "../components/empty-state.slint";
+
+export component PlayerPage inherits Rectangle {
+    in-out property <string> output-name: "";
+
+    callback open-settings();
+
+    background: transparent;
+
+    VerticalLayout {
+        padding: Theme.padPage;
+        spacing: Theme.gapLg;
+
+        Card {
+            vertical-stretch: 1;
+            EmptyState {
+                title: "播放器还没实装";
+                hint: "规划中的行为：拖入本地 mp3 / mp4 / m4a / wav / flac，直接把声音转发到当前输出设备，带进度、循环、暂停与热键。";
+                action-label: "去看输出设置";
+                acted => { root.open-settings(); }
+            }
+        }
+    }
+}

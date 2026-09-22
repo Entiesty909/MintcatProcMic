@@ -105,6 +105,7 @@ pub fn run_render_loop(
     mic_ring: Option<Arc<SpscRing>>,
     volume: Arc<AtomicU32>,
     mic_volume: Arc<AtomicU32>,
+    master: Arc<AtomicU32>,
     stop: Arc<AtomicBool>,
     peak: Arc<AtomicU32>,
     on_fail: impl FnOnce(Error),
@@ -169,6 +170,12 @@ pub fn run_render_loop(
             mic_tmp[mn..samples].fill(0.0);
             for i in 0..samples {
                 tmp[i] = (tmp[i] + mic_tmp[i] * mic_vol).clamp(-1.0, 1.0);
+            }
+        }
+        let master_vol = f32::from_bits(master.load(Ordering::Relaxed)).clamp(0.0, 1.0);
+        if (master_vol - 1.0).abs() > f32::EPSILON {
+            for s in &mut tmp[..samples] {
+                *s = (*s * master_vol).clamp(-1.0, 1.0);
             }
         }
         super::peak::hold_peak(&peak, &tmp[..samples]);

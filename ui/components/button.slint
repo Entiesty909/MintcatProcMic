@@ -1,0 +1,44 @@
+//! 扁平按钮。filled 主按钮、danger 危险按钮、默认次按钮三种外观由属性决定。
+
+import { Theme } from "../theme.slint";
+
+export component PmButton inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> enabled: true;
+    in property <bool> filled: false;
+    in property <bool> danger: false;
+    callback clicked();
+
+    height: Theme.controlHeight;
+    min-width: 76px;
+    border-radius: Theme.radiusControl;
+    opacity: root.enabled ? 1.0 : 0.45;
+    background: root.danger ? Theme.danger : (root.filled ? Theme.accent : Theme.field);
+    border-width: (root.filled || root.danger) ? 0px : 1px;
+    border-color: Theme.border;
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        alignment: LayoutAlignment.center;
+        Text {
+            text: root.label;
+            color: (root.filled || root.danger) ? Theme.onAccent : Theme.accent;
+            font-size: 13px;
+            font-weight: 600;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    states [
+        down when ta.pressed && root.enabled: {
+            opacity: 0.72;
+        }
+    ]
+}

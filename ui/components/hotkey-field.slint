@@ -1,0 +1,53 @@
+//! 热键显示与录制入口。按键解释与冲突判定在 ui_bridge 里做。
+
+import { Theme } from "../theme.slint";
+import { PmButton } from "button.slint";
+
+export component HotkeyField inherits HorizontalLayout {
+    in property <string> label: "";
+    in property <string> combo: "";
+    in property <bool> listening: false;
+    in property <bool> enabled: true;
+    callback begin();
+    callback reset();
+
+    height: Theme.controlHeight;
+    spacing: 8px;
+
+    Text {
+        text: root.label;
+        color: Theme.text2;
+        font-size: 13px;
+        vertical-alignment: TextVerticalAlignment.center;
+        width: 132px;
+    }
+    Rectangle {
+        height: Theme.controlHeight;
+        min-width: 168px;
+        horizontal-stretch: 1;
+        background: root.listening ? Theme.accentSoft : Theme.field;
+        border-radius: Theme.radiusControl;
+        border-width: 1px;
+        border-color: root.listening ? Theme.accent : Theme.border;
+        Text {
+            text: root.listening ? "按下新快捷键…" : (root.combo == "" ? "未设置" : root.combo);
+            color: root.listening ? Theme.accent : (root.combo == "" ? Theme.text3 : Theme.text);
+            font-size: 13px;
+            font-weight: 600;
+            vertical-alignment: TextVerticalAlignment.center;
+            x: 12px;
+            width: parent.width - 24px;
+            overflow: elide;
+        }
+    }
+    PmButton {
+        label: "更改";
+        enabled: root.enabled;
+        clicked => { root.begin(); }
+    }
+    PmButton {
+        label: "重置";
+        enabled: root.enabled;
+        clicked => { root.reset(); }
+    }
+}

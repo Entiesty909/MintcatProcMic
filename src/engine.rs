@@ -44,6 +44,8 @@ pub struct AudioEngine {
     volume: Arc<AtomicU32>,
     /// 物理麦音量。
     mic_volume: Arc<AtomicU32>,
+    /// 总音量：写进设备前的最终增益，对所有源统一生效。
+    master: Arc<AtomicU32>,
     /// 进程捕获峰值。
     capture_peak: Arc<AtomicU32>,
     /// 麦克风峰值。
@@ -71,6 +73,7 @@ impl AudioEngine {
             stop: Arc::new(AtomicBool::new(false)),
             volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             mic_volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            master: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             capture_peak: Arc::new(AtomicU32::new(0)),
             mic_peak: Arc::new(AtomicU32::new(0)),
             render_peak: Arc::new(AtomicU32::new(0)),
@@ -102,6 +105,12 @@ impl AudioEngine {
     /// 设置物理麦音量 0..=1。
     pub fn set_mic_volume(&self, volume: f32) {
         self.mic_volume
+            .store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    /// 设置总音量 0..=1。
+    pub fn set_master_volume(&self, volume: f32) {
+        self.master
             .store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 
@@ -237,6 +246,7 @@ impl AudioEngine {
         let stop_r = self.stop.clone();
         let vol_r = self.volume.clone();
         let mic_vol_r = self.mic_volume.clone();
+        let master_r = self.master.clone();
         let status_r = self.status.clone();
         let running_r = self.running.clone();
         let peak_r = self.render_peak.clone();
@@ -250,6 +260,7 @@ impl AudioEngine {
                     mic_ring,
                     vol_r,
                     mic_vol_r,
+                    master_r,
                     stop_r,
                     peak_r,
                     |err| {

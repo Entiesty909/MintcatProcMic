@@ -1,0 +1,158 @@
+//! 设置页：输出设备、麦克风、虚拟线缆、热键、关于。输出与麦克风的唯一可编辑入口在这里。
+
+import { ComboBox, CheckBox, ScrollView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { Card } from "../components/card.slint";
+import { PmButton } from "../components/button.slint";
+import { HotkeyField } from "../components/hotkey-field.slint";
+
+export component SettingsPage inherits Rectangle {
+    in-out property <[string]> devices: [];
+    in-out property <int> device-index: 0;
+    in-out property <bool> all-devices: false;
+    in-out property <bool> show-set-default-mic: false;
+    in-out property <bool> set-default-mic: false;
+    in-out property <string> dest-hint: "";
+    in-out property <[string]> mics: [];
+    in-out property <int> mic-index: 0;
+    in-out property <bool> running: false;
+    in-out property <bool> cable-installed: false;
+    in-out property <bool> cable-busy: false;
+    in-out property <string> cable-text: "";
+    in-out property <string> hotkey-label: "";
+    in-out property <bool> listening-hotkey: false;
+    in-out property <string> about-text: "";
+
+    callback refresh();
+    callback install-cable();
+    callback begin-hotkey-capture();
+    callback reset-hotkey();
+    callback all-devices-toggled(bool);
+    callback set-default-mic-toggled(bool);
+
+    background: transparent;
+
+    ScrollView {
+        width: 100%;
+        height: 100%;
+
+        VerticalLayout {
+            padding: Theme.padPage;
+            spacing: Theme.gapLg;
+
+            Card {
+                HorizontalLayout {
+                    Text {
+                        text: "输出与虚拟线缆";
+                        color: Theme.text2;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: TextVerticalAlignment.center;
+                    }
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                    Text {
+                        text: root.cable-installed ? "VB-CABLE 已安装" : root.cable-text;
+                        color: root.cable-installed ? Theme.ok : Theme.text2;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: TextVerticalAlignment.center;
+                    }
+                    if !root.cable-installed: PmButton {
+                        label: root.cable-busy ? "安装中…" : "安装 VB-CABLE";
+                        enabled: !root.cable-busy;
+                        clicked => { root.install-cable(); }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    ComboBox {
+                        horizontal-stretch: 1;
+                        model: root.devices;
+                        current-index <=> root.device-index;
+                        enabled: !root.running;
+                    }
+                    PmButton {
+                        label: "刷新";
+                        enabled: !root.running;
+                        clicked => { root.refresh(); }
+                    }
+                }
+                CheckBox {
+                    text: "显示全部播放设备（含物理扬声器）";
+                    checked <=> root.all-devices;
+                    enabled: !root.running;
+                    toggled => { root.all-devices-toggled(self.checked); }
+                }
+                if root.show-set-default-mic: CheckBox {
+                    text: "设为系统默认麦克风（停止转发后还原）";
+                    checked <=> root.set-default-mic;
+                    enabled: !root.running;
+                    toggled => { root.set-default-mic-toggled(self.checked); }
+                }
+                Text {
+                    text: root.dest-hint;
+                    color: Theme.text2;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+
+            Card {
+                Text {
+                    text: "混入麦克风";
+                    color: Theme.text2;
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+                ComboBox {
+                    model: root.mics;
+                    current-index <=> root.mic-index;
+                    enabled: !root.running;
+                }
+                Text {
+                    text: "物理麦克风会被混进同一条输出。要「我说话 + 音效一起进游戏」，就在游戏里把麦克风选成这只虚拟麦的录音端。";
+                    color: Theme.text3;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+
+            Card {
+                Text {
+                    text: "热键";
+                    color: Theme.text2;
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+                HotkeyField {
+                    label: "开始/停止转发";
+                    combo: root.hotkey-label;
+                    listening: root.listening-hotkey;
+                    begin => { root.begin-hotkey-capture(); }
+                    reset => { root.reset-hotkey(); }
+                }
+                Text {
+                    text: "捕获方式（仅系统热键 / 全局钩子 / 关闭）与风险提示在后续阶段实装。";
+                    color: Theme.text3;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+
+            Card {
+                Text {
+                    text: "关于";
+                    color: Theme.text2;
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+                Text {
+                    text: root.about-text;
+                    color: Theme.text2;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}

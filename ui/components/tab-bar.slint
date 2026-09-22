@@ -1,0 +1,48 @@
+//! 顶栏页签。四个固定页，不做滑动动画。
+
+import { Theme } from "../theme.slint";
+
+component TabItem inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> active: false;
+    callback clicked();
+
+    height: Theme.controlHeight;
+    min-width: 74px;
+    border-radius: 17px;
+    background: root.active ? Theme.card : transparent;
+    border-width: root.active ? 1px : 0px;
+    border-color: Theme.border;
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        alignment: LayoutAlignment.center;
+        Text {
+            text: root.label;
+            color: root.active ? Theme.text : Theme.text2;
+            font-size: 14px;
+            font-weight: root.active ? 600 : 500;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component TabBar inherits HorizontalLayout {
+    in property <int> current: 0;
+    callback picked(int);
+
+    height: Theme.controlHeight;
+    spacing: 4px;
+    alignment: start;
+
+    TabItem { label: "路由"; active: root.current == 0; clicked => { root.picked(0); } }
+    TabItem { label: "声板"; active: root.current == 1; clicked => { root.picked(1); } }
+    TabItem { label: "播放器"; active: root.current == 2; clicked => { root.picked(2); } }
+    TabItem { label: "设置"; active: root.current == 3; clicked => { root.picked(3); } }
+}

@@ -1,0 +1,29 @@
+//! 声纹柱：把 0..1 的采样序列画成柱，用于进程/麦克风/输出的电平反馈。
+
+import { Theme } from "../theme.slint";
+
+export component LevelMeter inherits Rectangle {
+    in property <[float]> samples;
+    in property <color> tint: Theme.ok;
+
+    height: Theme.meterHeight;
+    background: Theme.field;
+    border-radius: Theme.radiusControl;
+    clip: true;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        spacing: 2px;
+        for s in root.samples: Rectangle {
+            horizontal-stretch: 1;
+            border-radius: 1px;
+            height: max(2px, (parent.height - 12px) * min(1, max(0, s)));
+            y: (parent.height - self.height) / 2;
+            background: root.tint;
+            opacity: 0.25 + min(1, max(0, s)) * 0.75;
+        }
+    }
+}

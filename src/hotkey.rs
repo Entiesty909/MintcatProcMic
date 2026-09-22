@@ -1,7 +1,7 @@
 //! 全局开始/停止热键。独立消息窗口，游戏前台也能用。
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -11,7 +11,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     UnregisterClassW, WINDOW_EX_STYLE, WM_HOTKEY, WNDCLASSEXW, WS_OVERLAPPED,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS};
-use windows::core::{PCWSTR, w};
+use windows::core::w;
 
 use crate::config::Hotkey;
 

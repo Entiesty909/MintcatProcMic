@@ -1,0 +1,33 @@
+//! 空态提示：一句话 + 可选动作按钮。
+
+import { Theme } from "../theme.slint";
+import { PmButton } from "button.slint";
+
+export component EmptyState inherits VerticalLayout {
+    in property <string> title: "";
+    in property <string> hint: "";
+    in property <string> action-label: "";
+    callback acted();
+
+    spacing: Theme.gap;
+    alignment: LayoutAlignment.center;
+
+    Text {
+        text: root.title;
+        color: Theme.text;
+        font-size: 15px;
+        font-weight: 600;
+        horizontal-alignment: TextHorizontalAlignment.center;
+    }
+    Text {
+        text: root.hint;
+        color: Theme.text3;
+        font-size: 13px;
+        horizontal-alignment: TextHorizontalAlignment.center;
+        wrap: word-wrap;
+    }
+    if root.action-label != "": PmButton {
+        label: root.action-label;
+        clicked => { root.acted(); }
+    }
+}

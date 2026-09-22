@@ -1,0 +1,38 @@
+//! 视觉 token。软件渲染器，质感靠层次、间距、字重、配色，不用模糊/发光/动画。
+
+export global Theme {
+    // 底色与容器
+    out property <color> bg: #F5F5F7;
+    out property <color> card: #FFFFFF;
+    out property <color> field: #F2F2F7;
+    out property <color> border: #E5E5EA;
+
+    // 语义色
+    out property <color> accent: #007AFF;
+    out property <color> accentSoft: #E5F0FF;
+    out property <color> ok: #34C759;
+    out property <color> warn: #FF9F0A;
+    out property <color> danger: #FF3B30;
+    out property <color> onAccent: #FFFFFF;
+
+    // 文字三级
+    out property <color> text: #1D1D1F;
+    out property <color> text2: #6E6E73;
+    out property <color> text3: #AEAEB2;
+
+    // 圆角
+    out property <length> radiusCard: 16px;
+    out property <length> radiusControl: 10px;
+
+    // 间距
+    out property <length> padPage: 20px;
+    out property <length> padCard: 16px;
+    out property <length> gap: 10px;
+    out property <length> gapLg: 14px;
+
+    // 尺寸
+    out property <length> controlHeight: 34px;
+    out property <length> topBarHeight: 56px;
+    out property <length> statusBarHeight: 56px;
+    out property <length> meterHeight: 36px;
+}
