@@ -35,19 +35,34 @@ impl Hotkey {
     }
 }
 
-/// 热键集合。
+/// 全局热键集合。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Hotkeys {
     /// 开始/停止转发。
     pub toggle_route: Hotkey,
     /// 停止全部声音。
     pub stop_all: Option<Hotkey>,
+    /// 捕获方式。
+    #[serde(default)]
+    pub mode: HotkeyModeConfig,
 }
 
 impl Default for Hotkeys {
-    fn default() -> Self { Self { toggle_route: Hotkey::default(), stop_all: None } }
+    fn default() -> Self { Self { toggle_route: Hotkey::default(), stop_all: None, mode: HotkeyModeConfig::System } }
 }
 
+/// 配置文件中的热键模式。
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HotkeyModeConfig {
+    /// 安全默认：RegisterHotKey。
+    #[default]
+    System,
+    /// 全局键盘/鼠标 hook；启用时必须显示风险提示。
+    GlobalHook,
+    /// 关闭。
+    Disabled,
+}
 /// 输出设备与目标麦配置。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct OutputConfig {
