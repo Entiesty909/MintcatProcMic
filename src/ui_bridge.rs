@@ -366,17 +366,16 @@ fn wire_callbacks(
     }
 }
 
-/// 启动全局热键服务，热键等同于点一次开始/停止。
+/// 启动安全系统热键服务。全局 hook 模式在 S6 另行启用。
 fn start_hotkey(ui: &MainWindow, hotkey: &Rc<RefCell<config::Hotkey>>) -> HotkeyServer {
     let ui_weak = ui.as_weak();
     HotkeyServer::start(
+        crate::hotkey::HotkeyMode::System,
         *hotkey.borrow(),
         Arc::new(move || {
             let ui_weak = ui_weak.clone();
             let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.invoke_start_stop();
-                }
+                if let Some(ui) = ui_weak.upgrade() { ui.invoke_start_stop(); }
             });
         }),
     )
