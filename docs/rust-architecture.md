@@ -2,9 +2,9 @@
 
 基于 `docs/architecture-analysis.md`。这不是 C# 类图的翻译。
 
-产品：Windows 专用、极轻的 **Process Audio Router**。  
-栈：Rust 2024 + Slint + windows-rs + WASAPI。  
-MVP 范围见文末；托盘 / 自动重连 / 配置文件 / 快捷键 / 多进程混音 **不做**。
+产品：Windows 专用、极轻的 **Process Audio Router / Soundpad**。
+栈：Rust 2024 + Slint + windows-rs + WASAPI。
+当前路线：S1 UI 骨架已完成；S2 输出常驻与动态源已完成；S3+ 继续接配置、声板、文件播放器与多模式热键。
 
 ---
 
@@ -31,7 +31,11 @@ C# 源码已移除，分析结论见 `docs/architecture-analysis.md`，原始文
 ```text
 Cargo.toml
 build.rs
-ui/main.slint
+ui/
+  main.slint
+  theme.slint
+  components/
+  pages/
 src/
   main.rs              CLI + UI 入口
   error.rs             统一错误
@@ -42,10 +46,10 @@ src/
     device.rs          输出设备枚举
     format.rs          WAVEFORMATEX 解析 / 声道 / 线性重采样
     buffer.rs          SPSC f32 ring
-    capture.rs         Process Loopback 线程
-    render.rs          WASAPI render 线程
+    capture.rs         Process Loopback / 麦克风捕获线程
+    render.rs          WASAPI render 线程与三路 ring 混音
     wav.rs             开发验证：PCM16 WAV 写出
-  engine.rs            Start/Stop，拥有双线程
+  engine.rs            常驻输出、动态源、Start/Stop 兼容入口
   ui_bridge.rs         Slint 属性 / 回调
 docs/
   architecture-analysis.md
@@ -53,24 +57,27 @@ docs/
   step-*.md
 ```
 
-不建空的 `app/`、`router/`、`config/`、`monitor.rs`、`mixer.rs`。音量在 render 线程乘；进程退出由 capture 错误上报。
-
----
-
 ## 3. 线程
 
 ```text
 UI / main（Slint）
-    command: Start{pid, device_id} | Stop | SetVolume
-        ↓  mpsc + atomics
+    command: OpenOutput | CloseOutput | SetProcess | SetMic | SetVolume
+        ↓  safe AudioEngine API + atomics
 AudioEngine
-    ├─ capture thread   COM MTA，只 push ring
-    └─ render thread    COM MTA，只 pop ring + 写设备
-         SPSC ring 在两者之间
+    ├─ process capture thread  COM MTA → ring_process
+    ├─ mic capture thread      COM MTA → ring_mic
+    ├─ sfx/file thread         S2 先为空 → ring_sfx
+    └─ render thread           COM MTA：pop 三条 ring + 混音 + 写设备
 ```
 
-实时线程禁止：heap 扩容、文件、网络、UI、锁、tracing 刷屏。  
-ring 预分配；转换用线程启动时拿好的暂存 `Vec<f32>`（固定 cap，不清 cap）。
+每条 ring 都保持 SPSC：一个源线程生产，render 线程消费。输出线程可以独立常驻，
+进程源与物理麦源由 `set_process_source` / `set_mic_source` 动态启停，S4/S5 再让
+`ring_sfx` 接入声板与文件播放器。
+
+实时线程禁止：heap 扩容、文件、网络、UI、阻塞锁、tracing 刷屏。ring 预分配；
+转换用线程启动时拿好的暂存 `Vec<f32>`。关停仍用 `AtomicBool` + join。
+
+COM：音频线程 `CoInitializeEx(COINIT_MULTITHREADED)`。已初始化则忽略 `RPC_E_CHANGED_MODE`。
 
 关停：`AtomicBool` + `WaitForSingleObject` 超时 50–100ms，以便看到 stop。`Drop` join。
 

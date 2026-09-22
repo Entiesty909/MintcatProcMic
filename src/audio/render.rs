@@ -98,13 +98,15 @@ pub fn open_render_device(device_id: &str) -> Result<RenderClient, Error> {
     }
 }
 
-/// 渲染线程：等事件 → GetBuffer → 从 ring 填（不足补静音）→ 乘音量 → 写出。
+/// 渲染线程：等事件 → GetBuffer → 混合三条 ring → 乘总线音量 → 写出。
 pub fn run_render_loop(
     session: RenderClient,
     ring: Arc<SpscRing>,
     mic_ring: Option<Arc<SpscRing>>,
+    sfx_ring: Option<Arc<SpscRing>>,
     volume: Arc<AtomicU32>,
     mic_volume: Arc<AtomicU32>,
+    sfx_volume: Arc<AtomicU32>,
     master: Arc<AtomicU32>,
     stop: Arc<AtomicBool>,
     peak: Arc<AtomicU32>,
@@ -119,6 +121,7 @@ pub fn run_render_loop(
     let buffer_frames = session.buffer_frames;
     let mut tmp = vec![0.0f32; buffer_frames as usize * channels];
     let mut mic_tmp = vec![0.0f32; buffer_frames as usize * channels];
+    let mut sfx_tmp = vec![0.0f32; buffer_frames as usize * channels];
     let mut failed = None;
 
     while !stop.load(Ordering::Acquire) {
@@ -151,6 +154,7 @@ pub fn run_render_loop(
         let samples = avail as usize * channels;
         let vol = f32::from_bits(volume.load(Ordering::Relaxed)).clamp(0.0, 1.0);
         let mic_vol = f32::from_bits(mic_volume.load(Ordering::Relaxed)).clamp(0.0, 1.0);
+        let sfx_vol = f32::from_bits(sfx_volume.load(Ordering::Relaxed)).clamp(0.0, 1.0);
         let needed = tmp.len().max(samples);
         if tmp.len() < needed {
             tmp.resize(needed, 0.0);
@@ -169,8 +173,21 @@ pub fn run_render_loop(
             let mn = mic.pop(&mut mic_tmp[..samples]);
             mic_tmp[mn..samples].fill(0.0);
             for i in 0..samples {
-                tmp[i] = (tmp[i] + mic_tmp[i] * mic_vol).clamp(-1.0, 1.0);
+                tmp[i] = tmp[i] + mic_tmp[i] * mic_vol;
             }
+        }
+        if let Some(sfx) = &sfx_ring {
+            if sfx_tmp.len() < samples {
+                sfx_tmp.resize(samples, 0.0);
+            }
+            let sn = sfx.pop(&mut sfx_tmp[..samples]);
+            sfx_tmp[sn..samples].fill(0.0);
+            for i in 0..samples {
+                tmp[i] = tmp[i] + sfx_tmp[i] * sfx_vol;
+            }
+        }
+        for sample in &mut tmp[..samples] {
+            *sample = sample.clamp(-1.0, 1.0);
         }
         let master_vol = f32::from_bits(master.load(Ordering::Relaxed)).clamp(0.0, 1.0);
         if (master_vol - 1.0).abs() > f32::EPSILON {
