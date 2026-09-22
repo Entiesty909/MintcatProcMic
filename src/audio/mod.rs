@@ -8,4 +8,5 @@ pub mod format;
 pub mod peak;
 pub mod policy;
 pub mod render;
+pub mod sfx;
 pub mod wav;
