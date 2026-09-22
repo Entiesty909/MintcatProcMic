@@ -49,21 +49,36 @@ const WINDOW_H: f32 = 560.0;
 
 /// 创建窗口、填列表、跑事件循环。退出时还原默认麦并停引擎。
 pub fn run_ui() -> Result<(), Error> {
+    let Some(_instance) = config::acquire_single_instance()? else {
+        return Ok(());
+    };
     let ui = MainWindow::new().map_err(|e| Error::InvalidArgs(e.to_string()))?;
     let engine = Rc::new(AudioEngine::new());
-    let cache = Rc::new(RefCell::new(UiCache::default()));
+    let app_config = Rc::new(RefCell::new(config::load()));
+    let persisted = app_config.borrow().clone();
+    let cache = Rc::new(RefCell::new(UiCache {
+        all_devices: persisted.output.all_devices,
+        set_default_mic: persisted.output.set_default_mic,
+        ..UiCache::default()
+    }));
     let saved_mics = Rc::new(RefCell::new(Vec::<(u32, String)>::new()));
     let capture_hist = Rc::new(RefCell::new(vec![0.0f32; WAVE_BARS]));
     let mic_hist = Rc::new(RefCell::new(vec![0.0f32; WAVE_BARS]));
     let render_hist = Rc::new(RefCell::new(vec![0.0f32; WAVE_BARS]));
 
-    let hotkey = Rc::new(RefCell::new(config::load()));
+    let hotkey = Rc::new(RefCell::new(persisted.hotkeys.toggle_route));
     ui.set_hotkey_label(hotkey.borrow().label().into());
+    ui.set_volume((persisted.mix.process * 100.0).clamp(0.0, 100.0));
+    ui.set_mic_volume((persisted.mix.mic * 100.0).clamp(0.0, 100.0));
+    ui.set_master_volume((persisted.mix.master * 100.0).clamp(0.0, 100.0));
+    ui.set_all_devices(persisted.output.all_devices);
+    ui.set_set_default_mic(persisted.output.set_default_mic);
     ui.window()
         .show()
         .map_err(|e| Error::InvalidArgs(e.to_string()))?;
     fit_window_to_screen(&ui);
     refill(&ui, &cache, true);
+    restore_saved_selection(&ui, &cache, &persisted);
     set_wave(
         &ui,
         &capture_hist.borrow(),
@@ -72,7 +87,15 @@ pub fn run_ui() -> Result<(), Error> {
     );
 
     let hotkey_server = Rc::new(start_hotkey(&ui, &hotkey));
-    wire_callbacks(&ui, &engine, &cache, &saved_mics, &hotkey, &hotkey_server);
+    wire_callbacks(
+        &ui,
+        &engine,
+        &cache,
+        &saved_mics,
+        &hotkey,
+        &hotkey_server,
+        &app_config,
+    );
     let _timer = start_status_timer(
         &ui,
         &engine,
@@ -86,6 +109,7 @@ pub fn run_ui() -> Result<(), Error> {
 
     ui.run()
         .map_err(|e| Error::InvalidArgs(e.to_string()))?;
+    persist_config(&ui, &cache, &app_config);
     restore_default_mics(&saved_mics);
     engine.stop();
     Ok(())
@@ -137,28 +161,40 @@ fn wire_callbacks(
     saved_mics: &Rc<RefCell<Vec<(u32, String)>>>,
     hotkey: &Rc<RefCell<config::Hotkey>>,
     hotkey_server: &Rc<HotkeyServer>,
+    app_config: &Rc<RefCell<config::AppConfig>>,
 ) {
     {
-        let ui_weak = ui.as_weak();
-        let cache = cache.clone();
-        ui.on_refresh(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_error_text("".into());
-                refill(&ui, &cache, false);
-            }
+        let engine = engine.clone();
+        let app_config = app_config.clone();
+        ui.on_volume_edited(move |v| {
+            let value = (v / 100.0).clamp(0.0, 1.0);
+            engine.set_volume(value);
+            let mut config = app_config.borrow_mut();
+            config.mix.process = value;
+            config::save(&config);
         });
     }
     {
         let engine = engine.clone();
-        ui.on_volume_edited(move |v| engine.set_volume(v / 100.0));
+        let app_config = app_config.clone();
+        ui.on_mic_volume_edited(move |v| {
+            let value = (v / 100.0).clamp(0.0, 1.0);
+            engine.set_mic_volume(value);
+            let mut config = app_config.borrow_mut();
+            config.mix.mic = value;
+            config::save(&config);
+        });
     }
     {
         let engine = engine.clone();
-        ui.on_mic_volume_edited(move |v| engine.set_mic_volume(v / 100.0));
-    }
-    {
-        let engine = engine.clone();
-        ui.on_master_volume_edited(move |v| engine.set_master_volume(v / 100.0));
+        let app_config = app_config.clone();
+        ui.on_master_volume_edited(move |v| {
+            let value = (v / 100.0).clamp(0.0, 1.0);
+            engine.set_master_volume(value);
+            let mut config = app_config.borrow_mut();
+            config.mix.master = value;
+            config::save(&config);
+        });
     }
     {
         let ui_weak = ui.as_weak();
@@ -172,16 +208,20 @@ fn wire_callbacks(
     {
         let ui_weak = ui.as_weak();
         let cache = cache.clone();
+        let app_config = app_config.clone();
         ui.on_all_devices_toggled(move |on| {
             let Some(ui) = ui_weak.upgrade() else { return };
             cache.borrow_mut().all_devices = on;
+            app_config.borrow_mut().output.all_devices = on;
             refill_devices(&ui, &cache, false);
         });
     }
     {
         let cache = cache.clone();
+        let app_config = app_config.clone();
         ui.on_set_default_mic_toggled(move |on| {
             cache.borrow_mut().set_default_mic = on;
+            app_config.borrow_mut().output.set_default_mic = on;
         });
     }
     {
@@ -227,6 +267,7 @@ fn wire_callbacks(
         let ui_weak = ui.as_weak();
         let hotkey = hotkey.clone();
         let server = hotkey_server.clone();
+        let app_config = app_config.clone();
         ui.on_hotkey_captured(move |text, ctrl, shift, alt| {
             let Some(ui) = ui_weak.upgrade() else { return };
             ui.set_listening_hotkey(false);
@@ -234,19 +275,15 @@ fn wire_callbacks(
                 return;
             };
             let mut mods = 0u32;
-            if alt {
-                mods |= 1;
-            }
-            if ctrl {
-                mods |= 2;
-            }
-            if shift {
-                mods |= 4;
-            }
+            if alt { mods |= 1; }
+            if ctrl { mods |= 2; }
+            if shift { mods |= 4; }
             let hk = config::Hotkey { mods, vk };
-            config::save(hk);
             *hotkey.borrow_mut() = hk;
             server.set(hk);
+            let mut config = app_config.borrow_mut();
+            config.hotkeys.toggle_route = hk;
+            config::save(&config);
             ui.set_hotkey_label(hk.label().into());
         });
     }
@@ -254,11 +291,14 @@ fn wire_callbacks(
         let ui_weak = ui.as_weak();
         let hotkey = hotkey.clone();
         let server = hotkey_server.clone();
+        let app_config = app_config.clone();
         ui.on_reset_hotkey(move || {
             let hk = config::Hotkey::default();
-            config::save(hk);
             *hotkey.borrow_mut() = hk;
             server.set(hk);
+            let mut config = app_config.borrow_mut();
+            config.hotkeys.toggle_route = hk;
+            config::save(&config);
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_listening_hotkey(false);
                 ui.set_hotkey_label(hk.label().into());
@@ -270,6 +310,7 @@ fn wire_callbacks(
         let engine = engine.clone();
         let cache = cache.clone();
         let saved_mics = saved_mics.clone();
+        let app_config = app_config.clone();
         ui.on_start_stop(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
             if engine.is_running() {
@@ -281,20 +322,14 @@ fn wire_callbacks(
                 ui.set_error_text("".into());
                 return;
             }
-            let (pid, dest, mic_id, set_default) = {
+            let (pid, dest, mic_id, set_default, process_name) = {
                 let c = cache.borrow();
-                let pid = c
-                    .pids
-                    .get(ui.get_process_index() as usize)
-                    .copied()
-                    .filter(|p| *p != 0);
+                let pid = c.pids.get(ui.get_process_index() as usize).copied().filter(|p| *p != 0);
                 let dest = c.dests.get(ui.get_device_index() as usize).cloned();
-                let mic_id = c
-                    .mic_ids
-                    .get(ui.get_mic_index() as usize)
-                    .filter(|s| !s.is_empty())
-                    .cloned();
-                (pid, dest, mic_id, c.set_default_mic)
+                let mic_index = ui.get_mic_index() as usize;
+                let mic_id = c.mic_ids.get(mic_index).filter(|s| !s.is_empty()).cloned();
+                let process_name = pid.and_then(|pid| c.processes.iter().find(|p| p.pid == pid).map(|p| p.name.clone()));
+                (pid, dest, mic_id, c.set_default_mic, process_name)
             };
             let (Some(pid), Some(dest)) = (pid, dest) else {
                 ui.set_error_text("请选择进程和输出设备".into());
@@ -305,6 +340,14 @@ fn wire_callbacks(
             engine.set_master_volume(ui.get_master_volume() / 100.0);
             match engine.start(pid, &dest.render_id, mic_id.as_deref()) {
                 Ok(()) => {
+                    let mut config = app_config.borrow_mut();
+                    config.route.process_name = process_name;
+                    config.output.device_id = Some(dest.render_id.clone());
+                    config.output.device_name = Some(dest.label.clone());
+                    config.output.mic_id = dest.capture_id.clone();
+                    config.output.mic_name = dest.capture_name.clone();
+                    config.output.set_default_mic = set_default;
+                    config::save(&config);
                     ui.set_running(true);
                     ui.set_status_text("运行中".into());
                     ui.set_status_kind(1);
@@ -588,6 +631,51 @@ fn refill_devices(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>, initial: bool) 
     }
     update_output_text(ui, cache);
     ui.set_about_text(about_text(cache).into());
+}
+
+/// 按持久化的 ID / 名称恢复进程、输出设备与物理麦选择。
+fn restore_saved_selection(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>, saved: &config::AppConfig) {
+    {
+        let c = cache.borrow();
+        if let Some(name) = saved.route.process_name.as_deref()
+            && let Some(pid) = c.processes.iter().find(|p| p.name.eq_ignore_ascii_case(name)).map(|p| p.pid)
+            && let Some(index) = c.pids.iter().position(|v| *v == pid)
+        {
+            ui.set_process_index(index as i32);
+        }
+        let device_index = saved.output.device_id.as_deref()
+            .and_then(|id| c.dests.iter().position(|d| d.render_id == id))
+            .or_else(|| saved.output.device_name.as_deref().and_then(|name| c.dests.iter().position(|d| d.label == name)));
+        if let Some(index) = device_index {
+            ui.set_device_index(index as i32);
+        }
+        if let Some(id) = saved.output.mic_id.as_deref()
+            && let Some(index) = c.mic_ids.iter().position(|v| v == id)
+        {
+            ui.set_mic_index(index as i32);
+        }
+    }
+    update_output_text(ui, cache);
+    update_mic_text(ui, cache);
+}
+
+/// 退出前写回当前选择与混音值。
+fn persist_config(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>, app_config: &Rc<RefCell<config::AppConfig>>) {
+    let mut saved = app_config.borrow_mut();
+    let c = cache.borrow();
+    saved.output.all_devices = c.all_devices;
+    saved.output.set_default_mic = c.set_default_mic;
+    saved.output.device_id = c.dests.get(ui.get_device_index() as usize).map(|d| d.render_id.clone());
+    saved.output.device_name = c.dests.get(ui.get_device_index() as usize).map(|d| d.label.clone());
+    let mic_index = ui.get_mic_index() as usize;
+    saved.output.mic_id = c.mic_ids.get(mic_index).filter(|v| !v.is_empty()).cloned();
+    saved.output.mic_name = c.mic_names.get(mic_index).filter(|v| !v.is_empty()).cloned();
+    let pid = c.pids.get(ui.get_process_index() as usize).copied();
+    saved.route.process_name = pid.and_then(|pid| c.processes.iter().find(|p| p.pid == pid).map(|p| p.name.clone()));
+    saved.mix.process = (ui.get_volume() / 100.0).clamp(0.0, 1.0);
+    saved.mix.mic = (ui.get_mic_volume() / 100.0).clamp(0.0, 1.0);
+    saved.mix.master = (ui.get_master_volume() / 100.0).clamp(0.0, 1.0);
+    config::save(&saved);
 }
 
 /// 输出名称、说明短句、是否显示「设为默认麦」勾选。
