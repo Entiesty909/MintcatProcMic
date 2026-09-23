@@ -1,6 +1,7 @@
 //! 设置页：输出设备、麦克风、虚拟线缆、热键、关于。输出与麦克风的唯一可编辑入口在这里。
 
 import { ComboBox, CheckBox, ScrollView } from "std-widgets.slint";
+import { SliderRow } from "../components/slider-row.slint";
 import { Theme } from "../theme.slint";
 import { Card } from "../components/card.slint";
 import { PmButton } from "../components/button.slint";
@@ -25,8 +26,9 @@ export component SettingsPage inherits Rectangle {
     in-out property <bool> listening-hotkey: false;
     in-out property <string> playback-key-label: "未设置";
     in-out property <int> playback-key-mode: 0;
+    in-out property <bool> preview-enabled: false;
+    in-out property <float> preview-volume: 50;
     in-out property <string> about-text: "";
-
     callback refresh();
     callback install-cable();
     callback begin-hotkey-capture();
@@ -36,7 +38,8 @@ export component SettingsPage inherits Rectangle {
     callback set-default-render-toggled(bool);
     callback set-default-communications-toggled(bool);
     callback playback-key-mode-toggled(int);
-
+    callback preview-enabled-toggled(bool);
+    callback preview-volume-edited(float);
     background: transparent;
 
     ScrollView {
@@ -166,6 +169,12 @@ export component SettingsPage inherits Rectangle {
                 }
             }
 
+            Card {
+                Text { text: "本地预览"; color: Theme.text2; font-size: 12px; font-weight: 600; }
+                CheckBox { text: "播放音频时同时在本机预览"; checked <=> root.preview-enabled; enabled: !root.running; toggled => { root.preview-enabled-toggled(self.checked); } }
+                SliderRow { label: "预览音量"; value <=> root.preview-volume; enabled: root.preview-enabled; edited(v) => { root.preview-volume-edited(v); } }
+                Text { text: "预览声音只送到本机默认播放设备，不进入虚拟麦克风；默认关闭。"; color: Theme.text3; font-size: 12px; wrap: word-wrap; }
+            }
             Card {
                 Text {
                     text: "关于";

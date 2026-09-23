@@ -11,3 +11,4 @@ pub mod render;
 pub mod sfx;
 pub mod wav;
 pub mod decode;
+pub mod preview;

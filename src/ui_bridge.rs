@@ -82,7 +82,7 @@ pub fn run_ui() -> Result<(), Error> {
     let capture_hist = Rc::new(RefCell::new(vec![0.0f32; WAVE_BARS]));
     let mic_hist = Rc::new(RefCell::new(vec![0.0f32; WAVE_BARS]));
     let render_hist = Rc::new(RefCell::new(vec![0.0f32; WAVE_BARS]));
-
+    let preview = Rc::new(RefCell::new(if persisted.preview_enabled { crate::audio::preview::PreviewEngine::open_default().ok() } else { None }));
     let hotkey = Rc::new(RefCell::new(persisted.hotkeys.toggle_route));
     ui.set_hotkey_label(hotkey.borrow().label().into());
     if let Some(action) = persisted.playback_key {
@@ -123,6 +123,7 @@ pub fn run_ui() -> Result<(), Error> {
         &hotkey,
         &hotkey_server,
         &app_config,
+        &preview,
     );
     let _timer = start_status_timer(
         &ui,
@@ -190,6 +191,7 @@ fn wire_callbacks(
     hotkey: &Rc<RefCell<config::Hotkey>>,
     hotkey_server: &Rc<HotkeyServer>,
     app_config: &Rc<RefCell<config::AppConfig>>,
+    preview: &Rc<RefCell<Option<crate::audio::preview::PreviewEngine>>>,
 ) {
     {
         let engine = engine.clone();
@@ -243,6 +245,19 @@ fn wire_callbacks(
             app_config.borrow_mut().output.all_devices = on;
             refill_devices(&ui, &cache, false);
         });
+    }
+    {
+        let preview = preview.clone(); let app_config = app_config.clone();
+        ui.on_preview_enabled_toggled(move |enabled| {
+            app_config.borrow_mut().preview_enabled = enabled;
+            if enabled && preview.borrow().is_none() { *preview.borrow_mut() = crate::audio::preview::PreviewEngine::open_default().ok(); }
+            if !enabled { preview.borrow_mut().take(); }
+            config::save(&app_config.borrow());
+        });
+    }
+    {
+        let preview = preview.clone(); let app_config = app_config.clone();
+        ui.on_preview_volume_edited(move |v| { let value = (v / 100.0).clamp(0.0, 1.0); if let Some(engine) = preview.borrow().as_ref() { engine.set_volume(value); } app_config.borrow_mut().preview_volume = value; config::save(&app_config.borrow()); });
     }
     {
         let cache = cache.clone();
@@ -418,14 +433,18 @@ fn wire_callbacks(
                 c.audio_entries.iter().filter(|e| (category == "全部" || e.category == category) && (search.is_empty() || e.name.to_ascii_lowercase().contains(&search))).nth(index as usize).cloned()
             };
             let Some(entry) = entry else { return; };
-            match crate::audio::decode::open(std::path::Path::new(&entry.path)).and_then(|reader| reader.read_all()) {
-                Ok(data) => {
-                    let command = crate::audio::sfx::SfxCommand::Play { data: Arc::new(data), mode: if entry.loop_playback { crate::audio::sfx::SfxMode::Loop } else { crate::audio::sfx::SfxMode::Once }, volume: 1.0 };
-                    if let Ok(sender) = engine.sfx_sender() { let _ = sender.send(command); }
-                    if let Some(ui) = ui_weak.upgrade() { ui.set_audio_current_name(entry.name.into()); ui.set_player_playing(true); }
+            let sender = engine.sfx_sender().ok();
+            let ui_weak = ui_weak.clone();
+            let looped = entry.loop_playback;
+            thread::spawn(move || {
+                match crate::audio::decode::open(std::path::Path::new(&entry.path)).and_then(|reader| reader.read_all()) {
+                    Ok(data) => {
+                        if let Some(sender) = sender { let _ = sender.send(crate::audio::sfx::SfxCommand::Play { data: Arc::new(data), mode: if looped { crate::audio::sfx::SfxMode::Loop } else { crate::audio::sfx::SfxMode::Once }, volume: 1.0 }); }
+                        let _ = slint::invoke_from_event_loop(move || { if let Some(ui) = ui_weak.upgrade() { ui.set_audio_current_name(entry.name.into()); ui.set_player_playing(true); } });
+                    }
+                    Err(error) => { let _ = slint::invoke_from_event_loop(move || { if let Some(ui) = ui_weak.upgrade() { ui.set_error_text(error.user_message().into()); } }); }
                 }
-                Err(error) => if let Some(ui) = ui_weak.upgrade() { ui.set_error_text(error.user_message().into()); },
-            }
+            });
         });
     }
     {
