@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use slint::{ModelRc, Timer, TimerMode, VecModel};
 use windows::Win32::Foundation::HWND;
@@ -60,6 +60,8 @@ struct UiCache {
     audio_entries: Vec<config::AudioEntry>,
     /// 当前分类。
     audio_category: String,
+    /// 最近一次音频点击，用于区分单击选择与双击播放。
+    last_audio_click: Option<(usize, Instant)>,
     /// 搜索关键字。
     audio_search: String,
 }
@@ -435,42 +437,50 @@ fn wire_callbacks(
         });
     }
     {
-        let ui_weak = ui.as_weak();
-        let cache = cache.clone();
-        ui.on_audio_search_changed(move |text| {
-            cache.borrow_mut().audio_search = text.to_string();
-            if let Some(ui) = ui_weak.upgrade() { update_audio_list(&ui, &cache); }
+        let ui_weak = ui.as_weak(); let cache = cache.clone();
+        ui.on_audio_search_changed(move |text| { cache.borrow_mut().audio_search = text.to_string(); if let Some(ui) = ui_weak.upgrade() { update_audio_list(&ui, &cache); } });
+    }
+    {
+        let ui_weak = ui.as_weak(); let cache = cache.clone(); let app_config = app_config.clone();
+        ui.on_category_rename(move || {
+            let Some(ui) = ui_weak.upgrade() else { return; };
+            let index = ui.get_audio_category_index() as usize; let name = ui.get_audio_category_edit_name().trim().to_string(); if index < 2 || name.is_empty() { return; }
+            if let Some(old) = audio_categories(&cache).get(index).map(|s| s.to_string()) { let mut c = cache.borrow_mut(); for cat in &mut c.audio_categories { if *cat == old { *cat = name.clone(); } } for entry in &mut c.audio_entries { if entry.category == old { entry.category = name.clone(); } } let mut cfg = app_config.borrow_mut(); cfg.audio_categories = c.audio_categories.clone(); cfg.audio_entries = c.audio_entries.clone(); config::save(&cfg); ui.set_audio_categories(ModelRc::new(VecModel::from(audio_categories(&cache)))); update_audio_list(&ui, &cache); }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak(); let cache = cache.clone(); let app_config = app_config.clone();
+        ui.on_category_delete(move || {
+            let Some(ui) = ui_weak.upgrade() else { return; }; let index = ui.get_audio_category_index() as usize; if index < 2 { return; }
+            if let Some(name) = audio_categories(&cache).get(index).map(|s| s.to_string()) { let mut c = cache.borrow_mut(); c.audio_categories.retain(|v| v != &name); for entry in &mut c.audio_entries { if entry.category == name { entry.category = "未分类".into(); } } let mut cfg = app_config.borrow_mut(); cfg.audio_categories = c.audio_categories.clone(); cfg.audio_entries = c.audio_entries.clone(); config::save(&cfg); ui.set_audio_category_index(0); ui.set_audio_category_edit_name("".into()); ui.set_audio_categories(ModelRc::new(VecModel::from(audio_categories(&cache)))); update_audio_list(&ui, &cache); }
         });
     }
     {
         let ui_weak = ui.as_weak();
         let engine = engine.clone();
+        let cache = cache.clone();
         let preview = preview.clone();
-        let cache_for_callback = cache.clone();
         ui.on_audio_entry_double_clicked(move |index| {
-            let entry = {
-                let c = cache_for_callback.borrow();
-                let category = c.audio_category.clone();
-                let search = c.audio_search.to_ascii_lowercase();
-                c.audio_entries.iter().filter(|e| (category == "全部" || e.category == category) && (search.is_empty() || e.name.to_ascii_lowercase().contains(&search))).nth(index as usize).cloned()
-            };
+            let now = Instant::now();
+            let should_play = { let mut c = cache.borrow_mut(); let double = c.last_audio_click.is_some_and(|(last, time)| last == index as usize && now.duration_since(time) < Duration::from_millis(450)); c.last_audio_click = Some((index as usize, now)); double };
+            let Some(ui) = ui_weak.upgrade() else { return; };
+            ui.set_audio_entry_index(index);
+            if !should_play { return; }
+            let entry = { let c = cache.borrow(); let category = c.audio_category.clone(); let search = c.audio_search.to_ascii_lowercase(); c.audio_entries.iter().filter(|e| (category == "全部" || e.category == category) && (search.is_empty() || e.name.to_ascii_lowercase().contains(&search))).nth(index as usize).cloned() };
             let Some(entry) = entry else { return; };
-            let sender = engine.sfx_sender().ok();
-            let preview = preview.clone();
-            let looped = entry.loop_playback;
-            let ui_for_worker = ui_weak.clone();
+            if ui.get_player_playing() && ui.get_audio_current_name() == entry.name { if let Ok(sender) = engine.sfx_sender() { let _ = sender.send(crate::audio::sfx::SfxCommand::StopAll); } ui.set_player_playing(false); return; }
+            let sender = engine.sfx_sender().ok(); let preview = preview.clone(); let looped = entry.loop_playback; let ui_for_worker = ui_weak.clone();
             thread::spawn(move || {
                 match crate::audio::decode::open(std::path::Path::new(&entry.path)).and_then(|reader| reader.read_all()) {
-                    Ok(data) => {
-                        let data = Arc::new(data);
-                        if let Some(sender) = sender { let _ = sender.send(crate::audio::sfx::SfxCommand::Play { data: data.clone(), mode: if looped { crate::audio::sfx::SfxMode::Loop } else { crate::audio::sfx::SfxMode::Once }, volume: 1.0 }); }
-                        if let Ok(guard) = preview.lock() { if let Some(preview) = guard.as_ref() { preview.play(data, looped); } }
-                        let _ = slint::invoke_from_event_loop(move || { if let Some(ui) = ui_for_worker.upgrade() { ui.set_audio_current_name(entry.name.into()); ui.set_player_playing(true); } });
-                    }
+                    Ok(data) => { let data = Arc::new(data); if let Some(sender) = sender { let _ = sender.send(crate::audio::sfx::SfxCommand::Play { data: data.clone(), mode: if looped { crate::audio::sfx::SfxMode::Loop } else { crate::audio::sfx::SfxMode::Once }, volume: 1.0 }); } if let Ok(guard) = preview.lock() { if let Some(p) = guard.as_ref() { p.play(data, looped); } } let _ = slint::invoke_from_event_loop(move || { if let Some(ui) = ui_for_worker.upgrade() { ui.set_audio_current_name(entry.name.into()); ui.set_player_playing(true); } }); }
                     Err(error) => { let _ = slint::invoke_from_event_loop(move || { if let Some(ui) = ui_for_worker.upgrade() { ui.set_error_text(error.user_message().into()); } }); }
                 }
             });
         });
+    }
+    {
+        let engine = engine.clone();
+        ui.on_audio_progress_edited(move |position| { if let Ok(sender) = engine.sfx_sender() { let _ = sender.send(crate::audio::sfx::SfxCommand::Seek(position)); } });
     }
     {
         let ui_weak = ui.as_weak();

@@ -26,6 +26,8 @@ pub enum SfxMode {
 pub enum SfxCommand {
     /// 播放一个已解码 WAV。
     Play { data: Arc<WavData>, mode: SfxMode, volume: f32 },
+    /// 将当前播放位置跳到 0..1。
+    Seek(f32),
     /// 停止当前声音。
     Stop,
     /// 清空所有声音。
@@ -52,15 +54,12 @@ pub fn run_sfx_loop(
         while let Ok(command) = rx.try_recv() {
             match command {
                 SfxCommand::Play { data, mode, volume } => {
-                    if matches!(mode, SfxMode::Toggle)
-                        && players.iter().any(|p| Arc::ptr_eq(&p.data, &data))
-                    {
-                        players.retain(|p| !Arc::ptr_eq(&p.data, &data));
-                    } else {
-                        players.retain(|p| !p.finished);
-                        if players.len() < 8 {
-                            players.push(SfxPlayer::new(data, mode, volume));
-                        }
+                    players.clear();
+                    players.push(SfxPlayer::new(data, mode, volume));
+                }
+                SfxCommand::Seek(position) => {
+                    if let Some(player) = players.first_mut() {
+                        player.position = (position.clamp(0.0, 1.0) as f64) * player.data.samples.len() as f64;
                     }
                 }
                 SfxCommand::Stop | SfxCommand::StopAll => players.clear(),
