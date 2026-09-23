@@ -74,6 +74,11 @@ export component SettingsPage inherits Rectangle {
                         enabled: !root.cable-busy;
                         clicked => { root.install-cable(); }
                     }
+                    if root.cable-installed: PmButton {
+                        label: root.cable-busy ? "升级中…" : "升级到最新版";
+                        enabled: !root.cable-busy;
+                        clicked => { root.install-cable(); }
+                    }
                 }
                 Text { text: "输出设备（可多选）"; color: Theme.text2; font-size: 12px; font-weight: 600; }
                 VerticalLayout {

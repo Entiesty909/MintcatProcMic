@@ -190,8 +190,8 @@ fn run_as_admin(setup: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// 设备名是否像 VB-CABLE。
+/// 设备名或驱动标识是否像 VB-CABLE。
 pub fn device_looks_like_cable(name: &str) -> bool {
     let n = name.to_ascii_uppercase();
-    n.contains("CABLE") && (n.contains("VB") || n.contains("VIRTUAL"))
+    n.contains("VB-AUDIO") || n.contains("VB AUDIO") || n.contains("CABLE") || n.contains("VIRTUAL AUDIO")
 }
