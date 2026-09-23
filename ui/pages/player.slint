@@ -1,5 +1,4 @@
 //! 音频库：左侧分类树，右侧音频列表，底部迷你播放条。
-
 import { LineEdit, CheckBox } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Card } from "../components/card.slint";
@@ -16,88 +15,48 @@ export component PlayerPage inherits Rectangle {
     in-out property <string> current-position: "";
     in-out property <bool> loop: false;
     in-out property <bool> playing: false;
-
-    callback category-changed(int);
-    callback category-context(int);
-    callback search-changed(string);
-    callback entry-double-clicked(int);
-    callback add-files();
-    callback stop();
-    callback open-settings();
-
+    callback category-changed(int); callback category-context(int); callback search-changed(string); callback entry-double-clicked(int); callback add-files(); callback stop(); callback open-settings();
     background: transparent;
-
     VerticalLayout {
-        padding: Theme.padPage;
-        spacing: Theme.gap;
+        padding: Theme.padPage; spacing: Theme.gap;
         HorizontalLayout {
-            height: Theme.controlHeight;
-            spacing: 8px;
+            height: Theme.controlHeight; spacing: 8px;
             PmButton { label: "+ 添加文件"; clicked => { root.add-files(); } }
             LineEdit { horizontal-stretch: 1; placeholder-text: "搜索音频…"; text <=> root.search; edited(t) => { root.search-changed(t); } }
             Text { text: root.output-name == "" ? "目标：未选择" : "目标：" + root.output-name; color: Theme.text2; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; }
         }
         HorizontalLayout {
-            vertical-stretch: 1;
-            spacing: Theme.gap;
+            vertical-stretch: 1; spacing: Theme.gap;
             Card {
                 width: 230px;
                 VerticalLayout {
                     Text { text: "音频分类"; color: Theme.text2; font-size: 12px; font-weight: 600; }
-                    VerticalLayout {
-                        vertical-stretch: 1;
+                    VerticalLayout { vertical-stretch: 1;
                         for category[index] in root.categories: Rectangle {
-                            height: 32px;
-                            background: index == root.category-index ? Theme.accentSoft : transparent;
-                            border-radius: Theme.radiusControl;
+                            height: 32px; background: index == root.category-index ? Theme.accentSoft : transparent; border-radius: Theme.radiusControl;
                             Text { text: category; x: 12px; color: index == root.category-index ? Theme.accent : Theme.text; vertical-alignment: TextVerticalAlignment.center; }
-                            TouchArea {
-                                clicked => { root.category-changed(index); }
-                                pointer-event(event) => { if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) { root.category-context(index); } }
-                            }
+                            TouchArea { clicked => { root.category-index = index; root.category-changed(index); } pointer-event(event) => { if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) { root.category-index = index; root.category-context(index); } } }
                         }
                     }
                 }
             }
             Card {
-                horizontal-stretch: 1;
-                min-width: 0px;
+                horizontal-stretch: 1; min-width: 0px;
                 VerticalLayout {
-                    HorizontalLayout {
-                        height: Theme.controlHeight;
-                        Text { text: "索引"; width: 52px; color: Theme.text2; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; }
-                        Text { text: "音频名称"; horizontal-stretch: 1; color: Theme.text2; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; }
-                        Text { text: "状态"; width: 64px; color: Theme.text2; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; }
-                    }
-                    VerticalLayout {
-                        vertical-stretch: 1;
+                    HorizontalLayout { height: Theme.controlHeight; Text { text: "索引"; width: 52px; color: Theme.text2; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; } Text { text: "音频名称"; horizontal-stretch: 1; color: Theme.text2; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; } Text { text: "状态"; width: 64px; color: Theme.text2; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; } }
+                    VerticalLayout { vertical-stretch: 1;
                         for name[index] in root.entries: Rectangle {
-                            height: 32px;
-                            background: index == root.entry-index ? Theme.accentSoft : transparent;
-                            border-radius: Theme.radiusControl;
+                            height: 32px; background: index == root.entry-index ? Theme.accentSoft : transparent; border-radius: Theme.radiusControl;
                             Text { text: "\{index + 1}"; x: 8px; width: 44px; color: Theme.text2; vertical-alignment: TextVerticalAlignment.center; }
                             Text { text: name; x: 56px; width: parent.width - 130px; color: Theme.text; vertical-alignment: TextVerticalAlignment.center; overflow: elide; }
                             Text { text: index == root.entry-index && root.playing ? "播放中" : ""; x: parent.width - 66px; width: 58px; color: Theme.accent; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; }
-                            TouchArea { clicked => { root.entry-double-clicked(index); } }
+                            TouchArea { clicked => { root.entry-index = index; root.entry-double-clicked(index); } }
                         }
                     }
                     Text { text: "双击音频名称播放；长标题在列内截断。"; color: Theme.text3; font-size: 12px; }
                 }
             }
         }
-        Card {
-            height: 62px;
-            VerticalLayout {
-                HorizontalLayout {
-                    height: Theme.controlHeight;
-                    spacing: 8px;
-                    Text { text: root.playing ? "▶" : "■"; width: 20px; color: root.playing ? Theme.accent : Theme.text3; vertical-alignment: TextVerticalAlignment.center; }
-                    Text { text: root.current-name == "" ? "未播放" : root.current-name; horizontal-stretch: 1; color: Theme.text; font-weight: 600; vertical-alignment: TextVerticalAlignment.center; overflow: elide; }
-                    Text { text: root.current-position; width: 100px; color: Theme.text2; vertical-alignment: TextVerticalAlignment.center; }
-                    CheckBox { text: "循环"; checked <=> root.loop; }
-                    PmButton { label: "停止"; enabled: root.playing; clicked => { root.stop(); } }
-                }
-            }
-        }
+        Card { height: 62px; VerticalLayout { HorizontalLayout { height: Theme.controlHeight; spacing: 8px; Text { text: root.playing ? "▶" : "■"; width: 20px; color: root.playing ? Theme.accent : Theme.text3; vertical-alignment: TextVerticalAlignment.center; } Text { text: root.current-name == "" ? "未播放" : root.current-name; horizontal-stretch: 1; color: Theme.text; font-weight: 600; vertical-alignment: TextVerticalAlignment.center; overflow: elide; } Text { text: root.current-position; width: 100px; color: Theme.text2; vertical-alignment: TextVerticalAlignment.center; } CheckBox { text: "循环"; checked <=> root.loop; } PmButton { label: "停止"; enabled: root.playing; clicked => { root.stop(); } } } } }
     }
 }
