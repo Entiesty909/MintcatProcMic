@@ -1,4 +1,4 @@
-//! 顶栏页签。四个固定页，不做滑动动画。
+//! 顶栏页签：路由、音频库、设置。声板与播放器合并为音频库。
 
 import { Theme } from "../theme.slint";
 
@@ -26,7 +26,6 @@ component TabItem inherits Rectangle {
             vertical-alignment: TextVerticalAlignment.center;
         }
     }
-
     ta := TouchArea {
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
@@ -36,13 +35,11 @@ component TabItem inherits Rectangle {
 export component TabBar inherits HorizontalLayout {
     in property <int> current: 0;
     callback picked(int);
-
     height: Theme.controlHeight;
     spacing: 4px;
     alignment: start;
 
     TabItem { label: "路由"; active: root.current == 0; clicked => { root.picked(0); } }
-    TabItem { label: "声板"; active: root.current == 1; clicked => { root.picked(1); } }
-    TabItem { label: "播放器"; active: root.current == 2; clicked => { root.picked(2); } }
-    TabItem { label: "设置"; active: root.current == 3; clicked => { root.picked(3); } }
+    TabItem { label: "音频库"; active: root.current == 1; clicked => { root.picked(1); } }
+    TabItem { label: "设置"; active: root.current == 2; clicked => { root.picked(2); } }
 }

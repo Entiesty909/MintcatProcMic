@@ -68,11 +68,15 @@ pub fn run_ui() -> Result<(), Error> {
 
     let hotkey = Rc::new(RefCell::new(persisted.hotkeys.toggle_route));
     ui.set_hotkey_label(hotkey.borrow().label().into());
+    if let Some(action) = persisted.playback_key {
+        ui.set_playback_key_label(action.key.label().into());
+        ui.set_playback_key_mode(match action.mode {
+            config::PlaybackKeyMode::None => 0,
+            config::PlaybackKeyMode::Press => 1,
+            config::PlaybackKeyMode::Hold => 2,
+        });
+    }
     ui.set_volume((persisted.mix.process * 100.0).clamp(0.0, 100.0));
-    ui.set_mic_volume((persisted.mix.mic * 100.0).clamp(0.0, 100.0));
-    ui.set_master_volume((persisted.mix.master * 100.0).clamp(0.0, 100.0));
-    ui.set_all_devices(persisted.output.all_devices);
-    ui.set_set_default_mic(persisted.output.set_default_mic);
     ui.window()
         .show()
         .map_err(|e| Error::InvalidArgs(e.to_string()))?;
@@ -303,6 +307,16 @@ fn wire_callbacks(
                 ui.set_listening_hotkey(false);
                 ui.set_hotkey_label(hk.label().into());
             }
+        });
+    }
+    {
+        let app_config = app_config.clone();
+        ui.on_playback_key_mode_toggled(move |mode| {
+            let mut config = app_config.borrow_mut();
+            let current_key = config.playback_key.map(|a| a.key).unwrap_or_default();
+            let mode = match mode { 1 => config::PlaybackKeyMode::Press, 2 => config::PlaybackKeyMode::Hold, _ => config::PlaybackKeyMode::None };
+            config.playback_key = Some(config::PlaybackKeyAction { mode, key: current_key });
+            config::save(&config);
         });
     }
     {
