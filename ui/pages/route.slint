@@ -119,38 +119,6 @@ export component RoutePage inherits Rectangle {
             HorizontalLayout {
                 vertical-stretch: 0;
                 Text {
-                    text: "混入麦克风";
-                    color: Theme.text2;
-                    font-size: 12px;
-                    font-weight: 600;
-                    vertical-alignment: TextVerticalAlignment.center;
-                }
-                Rectangle { horizontal-stretch: 1; background: transparent; }
-                Text {
-                    text: root.has-mic ? "已启用" : "未启用";
-                    color: root.has-mic ? Theme.accent : Theme.text3;
-                    font-size: 12px;
-                    vertical-alignment: TextVerticalAlignment.center;
-                }
-            }
-            ReadOnlyField {
-                text: root.mic-name;
-                placeholder: "在设置页选择麦克风";
-            }
-            LevelMeter { samples: root.mic-wave; tint: Theme.accent; }
-            SliderRow {
-                label: "音量";
-                value <=> root.mic-volume;
-                enabled: root.has-mic;
-                edited(v) => { root.mic-volume-edited(v); }
-            }
-        }
-        Card {
-            horizontal-stretch: 1;
-            min-width: 0px;
-            HorizontalLayout {
-                vertical-stretch: 0;
-                Text {
                     text: "送到哪里";
                     color: Theme.text2;
                     font-size: 12px;

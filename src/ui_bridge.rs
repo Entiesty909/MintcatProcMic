@@ -88,6 +88,7 @@ pub fn run_ui() -> Result<(), Error> {
     ui.set_volume((persisted.mix.process * 100.0).clamp(0.0, 100.0));
     ui.set_mic_volume((persisted.mix.mic * 100.0).clamp(0.0, 100.0));
     ui.set_master_volume((persisted.mix.master * 100.0).clamp(0.0, 100.0));
+    ui.set_mix_mic(persisted.route.mix_mic);
     ui.window()
         .show()
         .map_err(|e| Error::InvalidArgs(e.to_string()))?;
@@ -324,6 +325,14 @@ fn wire_callbacks(
     }
     {
         let app_config = app_config.clone();
+        ui.on_mix_mic_toggled(move |on| {
+            let mut config = app_config.borrow_mut();
+            config.route.mix_mic = on;
+            config::save(&config);
+        });
+    }
+    {
+        let app_config = app_config.clone();
         ui.on_playback_key_mode_toggled(move |mode| {
             let mut config = app_config.borrow_mut();
             let current_key = config.playback_key.map(|a| a.key).unwrap_or_default();
@@ -405,19 +414,19 @@ fn wire_callbacks(
             if engine.is_running() {
                 engine.stop(); restore_default_mics(&saved_mics); ui.set_running(false); ui.set_status_text("未运行".into()); ui.set_status_kind(0); ui.set_error_text("".into()); return;
             }
-            let (pid, dest, mic_id, set_default, process_name) = {
+            let (pid, dest, mic_id, set_default, process_name, mix_mic) = {
                 let c = cache.borrow();
                 let pid = c.pids.get(ui.get_process_index() as usize).copied().filter(|p| *p != 0);
                 let dest = c.dests.get(ui.get_device_index() as usize).cloned();
                 let mic_index = ui.get_mic_index() as usize;
-                let mic_id = c.mic_ids.get(mic_index).filter(|s| !s.is_empty()).cloned();
+                let mic_id = if ui.get_mix_mic() { c.mic_ids.get(mic_index).filter(|s| !s.is_empty()).cloned() } else { None };
                 let process_name = pid.and_then(|pid| c.processes.iter().find(|p| p.pid == pid).map(|p| p.name.clone()));
-                (pid, dest, mic_id, c.set_default_mic, process_name)
+                (pid, dest, mic_id, c.set_default_mic, process_name, ui.get_mix_mic())
             };
             let (Some(pid), Some(dest)) = (pid, dest) else { ui.set_error_text("请选择进程和输出设备".into()); return; };
             engine.set_volume(ui.get_volume() / 100.0); engine.set_mic_volume(ui.get_mic_volume() / 100.0); engine.set_master_volume(ui.get_master_volume() / 100.0);
             match engine.start(pid, &dest.render_id, mic_id.as_deref()) {
-                Ok(()) => { let mut config = app_config.borrow_mut(); config.route.process_name = process_name; config.output.device_id = Some(dest.render_id.clone()); config.output.device_name = Some(dest.label.clone()); config.output.mic_id = dest.capture_id.clone(); config.output.mic_name = dest.capture_name.clone(); config.output.set_default_mic = set_default; config::save(&config); ui.set_running(true); ui.set_status_text("运行中".into()); ui.set_status_kind(1); ui.set_error_text("".into()); apply_virtual_mic_route(&ui, &dest, set_default, &saved_mics); }
+                Ok(()) => { let mut config = app_config.borrow_mut(); config.route.process_name = process_name; config.route.mix_mic = mix_mic; config.output.device_id = Some(dest.render_id.clone()); config.output.device_name = Some(dest.label.clone()); config.output.mic_id = dest.capture_id.clone(); config.output.mic_name = dest.capture_name.clone(); config.output.set_default_mic = set_default; config::save(&config); ui.set_running(true); ui.set_status_text("运行中".into()); ui.set_status_kind(1); ui.set_error_text("".into()); apply_virtual_mic_route(&ui, &dest, set_default, &saved_mics); }
                 Err(e) => { tracing::warn!("start failed: {e}"); ui.set_running(false); ui.set_status_text("错误".into()); ui.set_status_kind(3); ui.set_error_text(e.user_message().into()); }
             }
         });
@@ -722,7 +731,7 @@ fn persist_config(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>, app_config: &Rc
     saved.audio_entries = c.audio_entries.clone();
     saved.output.all_devices = c.all_devices;
     saved.output.set_default_mic = c.set_default_mic;
-    saved.output.device_id = c.dests.get(ui.get_device_index() as usize).map(|d| d.render_id.clone());
+    saved.route.mix_mic = ui.get_mix_mic();
     saved.output.device_name = c.dests.get(ui.get_device_index() as usize).map(|d| d.label.clone());
     let mic_index = ui.get_mic_index() as usize;
     saved.output.mic_id = c.mic_ids.get(mic_index).filter(|v| !v.is_empty()).cloned();

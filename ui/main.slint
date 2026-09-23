@@ -1,10 +1,10 @@
-//! 主窗口：顶栏页签 + 页面视图 + 常驻状态栏。
-//! 权威状态在 Rust（AudioEngine / ui_bridge），这里只做展示与回调转发。
+//! 主窗口：三页路由、音频库、设置与常驻状态栏。
 
 import { Theme } from "theme.slint";
 import { TabBar } from "components/tab-bar.slint";
 import { PmButton } from "components/button.slint";
 import { SliderRow } from "components/slider-row.slint";
+import { CheckBox } from "std-widgets.slint";
 import { RoutePage } from "pages/route.slint";
 import { PlayerPage } from "pages/player.slint";
 import { SettingsPage } from "pages/settings.slint";
@@ -20,8 +20,6 @@ export component MainWindow inherits Window {
     default-font-size: 14px;
 
     in-out property <int> page: 0;
-
-    // 状态栏
     in-out property <string> status-text: "未运行";
     in-out property <int> status-kind: 0;
     in-out property <string> error-text: "";
@@ -30,7 +28,6 @@ export component MainWindow inherits Window {
     in-out property <string> output-name: "";
     in-out property <string> about-text: "";
 
-    // 路由
     in-out property <[string]> processes: [];
     in-out property <int> process-index: 0;
     in-out property <string> process-filter: "";
@@ -38,6 +35,8 @@ export component MainWindow inherits Window {
     in-out property <float> mic-volume: 100;
     in-out property <bool> has-mic: false;
     in-out property <string> mic-name: "";
+    in-out property <bool> mix-mic: false;
+
     in-out property <string> player-file-path: "";
     in-out property <bool> player-loop: false;
     in-out property <bool> player-playing: false;
@@ -48,6 +47,7 @@ export component MainWindow inherits Window {
     in-out property <string> audio-search: "";
     in-out property <string> audio-current-name: "";
     in-out property <string> audio-current-position: "";
+
     in-out property <[string]> devices: [];
     in-out property <int> device-index: 0;
     in-out property <bool> all-devices: false;
@@ -56,22 +56,17 @@ export component MainWindow inherits Window {
     in-out property <bool> show-set-default-mic: false;
     in-out property <bool> set-default-mic: false;
     in-out property <string> dest-hint: "";
-    in-out property <string> playback-key-label: "未设置";
-    in-out property <int> playback-key-mode: 0;
 
-    // 虚拟线缆
     in-out property <bool> cable-installed: false;
     in-out property <bool> cable-busy: false;
     in-out property <string> cable-text: "";
-
-    // 电平
+    in-out property <string> hotkey-label: "";
+    in-out property <bool> listening-hotkey: false;
+    in-out property <string> playback-key-label: "未设置";
+    in-out property <int> playback-key-mode: 0;
     in-out property <[float]> capture-wave: [];
     in-out property <[float]> mic-wave: [];
     in-out property <[float]> render-wave: [];
-
-    // 热键
-    in-out property <string> hotkey-label: "";
-    in-out property <bool> listening-hotkey: false;
 
     callback start-stop();
     callback refresh();
@@ -81,27 +76,26 @@ export component MainWindow inherits Window {
     callback process-filter-changed(string);
     callback all-devices-toggled(bool);
     callback set-default-mic-toggled(bool);
+    callback mix-mic-toggled(bool);
     callback install-cable();
     callback begin-hotkey-capture();
     callback reset-hotkey();
     callback hotkey-captured(string, bool, bool, bool);
+    callback playback-key-mode-toggled(int);
     callback add-audio-files();
     callback audio-category-changed(int);
     callback audio-search-changed(string);
     callback audio-entry-double-clicked(int);
     callback audio-stop();
-    callback playback-key-mode-toggled(int);
+
     FocusScope {
         key-pressed(event) => {
             if (root.listening-hotkey) {
                 root.hotkey-captured(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt);
                 accept
-            } else {
-                reject
-            }
+            } else { reject }
         }
         VerticalLayout {
-            // 顶栏
             Rectangle {
                 height: Theme.topBarHeight;
                 background: transparent;
@@ -110,17 +104,8 @@ export component MainWindow inherits Window {
                     padding-right: Theme.padPage;
                     spacing: 16px;
                     alignment: LayoutAlignment.center;
-                    Text {
-                        text: "ProcessMic";
-                        font-size: 20px;
-                        font-weight: 700;
-                        color: Theme.text;
-                        vertical-alignment: TextVerticalAlignment.center;
-                    }
-                    TabBar {
-                        current: root.page;
-                        picked(i) => { root.page = i; }
-                    }
+                    Text { text: "ProcessMic"; font-size: 20px; font-weight: 700; color: Theme.text; vertical-alignment: TextVerticalAlignment.center; }
+                    TabBar { current: root.page; picked(i) => { root.page = i; } }
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                     Rectangle {
                         height: 26px;
@@ -132,159 +117,65 @@ export component MainWindow inherits Window {
                             padding-left: 12px;
                             padding-right: 12px;
                             alignment: LayoutAlignment.center;
-                            Text {
-                                text: root.cable-installed ? "VB-CABLE 已安装" : "未检测到 VB-CABLE";
-                                color: root.cable-installed ? #248A3D : Theme.text2;
-                                font-size: 12px;
-                                font-weight: 600;
-                                vertical-alignment: TextVerticalAlignment.center;
-                            }
+                            Text { text: root.cable-installed ? "VB-CABLE 已安装" : "未检测到 VB-CABLE"; color: root.cable-installed ? #248A3D : Theme.text2; font-size: 12px; font-weight: 600; vertical-alignment: TextVerticalAlignment.center; }
                         }
                     }
                 }
             }
-
-            // 页面
             Rectangle {
                 vertical-stretch: 1;
                 min-height: 0px;
                 clip: true;
                 background: transparent;
-
                 if root.page == 0: RoutePage {
-                    min-width: 0px;
-                    min-height: 0px;
-                    width: 100%;
-                    height: 100%;
-                    processes <=> root.processes;
-                    process-index <=> root.process-index;
-                    process-filter <=> root.process-filter;
-                    volume <=> root.volume;
-                    mic-volume <=> root.mic-volume;
-                    capture-wave <=> root.capture-wave;
-                    mic-wave <=> root.mic-wave;
-                    render-wave <=> root.render-wave;
-                    output-name <=> root.output-name;
-                    dest-hint <=> root.dest-hint;
-                    running <=> root.running;
-                    has-mic <=> root.has-mic;
-                    mic-name <=> root.mic-name;
-                    refresh => { root.refresh(); }
-                    filter-changed(t) => { root.process-filter-changed(t); }
-                    volume-edited(v) => { root.volume-edited(v); }
-                    mic-volume-edited(v) => { root.mic-volume-edited(v); }
+                    width: 100%; height: 100%; min-width: 0px; min-height: 0px;
+                    processes <=> root.processes; process-index <=> root.process-index; process-filter <=> root.process-filter;
+                    volume <=> root.volume; mic-volume <=> root.mic-volume; capture-wave <=> root.capture-wave; mic-wave <=> root.mic-wave;
+                    render-wave <=> root.render-wave; output-name <=> root.output-name; dest-hint <=> root.dest-hint; running <=> root.running;
+                    has-mic <=> root.has-mic; mic-name <=> root.mic-name;
+                    refresh => { root.refresh(); } filter-changed(t) => { root.process-filter-changed(t); }
+                    volume-edited(v) => { root.volume-edited(v); } mic-volume-edited(v) => { root.mic-volume-edited(v); }
                     open-settings => { root.page = 2; }
                 }
-
                 if root.page == 1: PlayerPage {
-                    width: 100%;
-                    height: 100%;
-                    min-width: 0px;
-                    min-height: 0px;
-                    output-name <=> root.output-name;
-                    categories <=> root.audio-categories;
-                    category-index <=> root.audio-category-index;
-                    entries <=> root.audio-entries;
-                    entry-index <=> root.audio-entry-index;
-                    search <=> root.audio-search;
-                    current-name <=> root.audio-current-name;
-                    current-position <=> root.audio-current-position;
-                    loop <=> root.player-loop;
-                    playing <=> root.player-playing;
-                    category-changed(i) => { root.audio-category-changed(i); }
-                    search-changed(t) => { root.audio-search-changed(t); }
-                    entry-double-clicked(i) => { root.audio-entry-double-clicked(i); }
-                    add-files => { root.add-audio-files(); }
-                    stop => { root.audio-stop(); }
-                    open-settings => { root.page = 2; }
+                    width: 100%; height: 100%; min-width: 0px; min-height: 0px;
+                    output-name <=> root.output-name; categories <=> root.audio-categories; category-index <=> root.audio-category-index;
+                    entries <=> root.audio-entries; entry-index <=> root.audio-entry-index; search <=> root.audio-search;
+                    current-name <=> root.audio-current-name; current-position <=> root.audio-current-position; loop <=> root.player-loop; playing <=> root.player-playing;
+                    category-changed(i) => { root.audio-category-changed(i); } search-changed(t) => { root.audio-search-changed(t); }
+                    entry-double-clicked(i) => { root.audio-entry-double-clicked(i); } add-files => { root.add-audio-files(); }
+                    stop => { root.audio-stop(); } open-settings => { root.page = 2; }
                 }
-
                 if root.page == 2: SettingsPage {
-                    width: 100%;
-                    height: 100%;
-                    min-width: 0px;
-                    min-height: 0px;
-                    devices <=> root.devices;
-                    device-index <=> root.device-index;
-                    all-devices <=> root.all-devices;
-                    show-set-default-mic <=> root.show-set-default-mic;
-                    set-default-mic <=> root.set-default-mic;
-                    dest-hint <=> root.dest-hint;
-                    mics <=> root.mics;
-                    mic-index <=> root.mic-index;
-                    running <=> root.running;
-                    cable-installed <=> root.cable-installed;
-                    cable-busy <=> root.cable-busy;
-                    cable-text <=> root.cable-text;
-                    hotkey-label <=> root.hotkey-label;
-                    listening-hotkey <=> root.listening-hotkey;
-                    playback-key-label <=> root.playback-key-label;
-                    playback-key-mode <=> root.playback-key-mode;
+                    width: 100%; height: 100%; min-width: 0px; min-height: 0px;
+                    devices <=> root.devices; device-index <=> root.device-index; all-devices <=> root.all-devices;
+                    show-set-default-mic <=> root.show-set-default-mic; set-default-mic <=> root.set-default-mic; dest-hint <=> root.dest-hint;
+                    mics <=> root.mics; mic-index <=> root.mic-index; running <=> root.running; cable-installed <=> root.cable-installed;
+                    cable-busy <=> root.cable-busy; cable-text <=> root.cable-text; hotkey-label <=> root.hotkey-label;
+                    listening-hotkey <=> root.listening-hotkey; playback-key-label <=> root.playback-key-label; playback-key-mode <=> root.playback-key-mode;
                     about-text <=> root.about-text;
-                    refresh => { root.refresh(); }
-                    install-cable => { root.install-cable(); }
-                    begin-hotkey-capture => { root.begin-hotkey-capture(); }
-                    reset-hotkey => { root.reset-hotkey(); }
-                    all-devices-toggled(b) => { root.all-devices-toggled(b); }
-                    set-default-mic-toggled(b) => { root.set-default-mic-toggled(b); }
-                    playback-key-mode-toggled(m) => { root.playback-key-mode-toggled(m); }
+                    refresh => { root.refresh(); } install-cable => { root.install-cable(); } begin-hotkey-capture => { root.begin-hotkey-capture(); }
+                    reset-hotkey => { root.reset-hotkey(); } all-devices-toggled(b) => { root.all-devices-toggled(b); }
+                    set-default-mic-toggled(b) => { root.set-default-mic-toggled(b); } playback-key-mode-toggled(m) => { root.playback-key-mode-toggled(m); }
                 }
             }
-            // 状态栏
             Rectangle {
                 height: root.error-text == "" ? Theme.statusBarHeight : Theme.statusBarHeight + 22px;
                 background: transparent;
                 HorizontalLayout {
-                    padding-left: Theme.padPage;
-                    padding-right: Theme.padPage;
-                    padding-bottom: Theme.gap;
-                    spacing: Theme.gap;
+                    padding-left: Theme.padPage; padding-right: Theme.padPage; padding-bottom: Theme.gap; spacing: Theme.gap;
                     VerticalLayout {
-                        spacing: 4px;
-                        alignment: LayoutAlignment.center;
-                        if root.error-text != "": Text {
-                            text: root.error-text;
-                            color: Theme.danger;
-                            font-size: 13px;
-                            wrap: word-wrap;
-                        }
+                        spacing: 4px; alignment: LayoutAlignment.center;
+                        if root.error-text != "": Text { text: root.error-text; color: Theme.danger; font-size: 13px; wrap: word-wrap; }
                         HorizontalLayout {
-                            height: Theme.controlHeight;
-                            spacing: Theme.gap;
-                            alignment: LayoutAlignment.center;
-                            Rectangle {
-                                width: 8px;
-                                height: 8px;
-                                border-radius: 4px;
-                                background: root.status-kind == 1 ? Theme.ok : (root.status-kind == 2 ? Theme.warn : (root.status-kind == 3 ? Theme.danger : Theme.text3));
-                            }
-                            Text {
-                                text: root.status-text;
-                                color: Theme.text;
-                                font-size: 13px;
-                                font-weight: 600;
-                                vertical-alignment: TextVerticalAlignment.center;
-                            }
-                            Text {
-                                text: root.output-name == "" ? "输出：未选择" : "输出：" + root.output-name;
-                                color: Theme.text2;
-                                font-size: 13px;
-                                vertical-alignment: TextVerticalAlignment.center;
-                            }
+                            height: Theme.controlHeight; spacing: Theme.gap; alignment: LayoutAlignment.center;
+                            Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.status-kind == 1 ? Theme.ok : (root.status-kind == 2 ? Theme.warn : (root.status-kind == 3 ? Theme.danger : Theme.text3)); }
+                            Text { text: root.status-text; color: Theme.text; font-size: 13px; font-weight: 600; vertical-alignment: TextVerticalAlignment.center; }
+                            Text { text: root.output-name == "" ? "输出：未选择" : "输出：" + root.output-name; color: Theme.text2; font-size: 13px; vertical-alignment: TextVerticalAlignment.center; }
                             Rectangle { horizontal-stretch: 1; background: transparent; }
-                            SliderRow {
-                                width: 260px;
-                                label: "总音量";
-                                value <=> root.master-volume;
-                                edited(v) => { root.master-volume-edited(v); }
-                            }
-                            PmButton {
-                                label: root.running ? "停止转发" : "开始转发";
-                                filled: !root.running;
-                                danger: root.running;
-                                enabled: !root.cable-busy;
-                                clicked => { root.start-stop(); }
-                            }
+                            CheckBox { text: "混入物理麦"; checked <=> root.mix-mic; enabled: !root.running && root.has-mic; toggled => { root.mix-mic-toggled(self.checked); } }
+                            SliderRow { width: 260px; label: "总音量"; value <=> root.master-volume; edited(v) => { root.master-volume-edited(v); } }
+                            PmButton { label: root.running ? "停止转发" : "开始转发"; filled: !root.running; danger: root.running; enabled: !root.cable-busy; clicked => { root.start-stop(); } }
                         }
                     }
                 }

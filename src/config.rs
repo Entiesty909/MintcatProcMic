@@ -80,13 +80,15 @@ pub struct OutputConfig {
     pub all_devices: bool,
 }
 
-/// 路由选择配置。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RouteConfig {
     /// 上次选中的可执行文件名，用名字找新 PID。
     pub process_name: Option<String>,
     /// 进程退出后自动重连开关。
     pub auto_reconnect: bool,
+    /// 开始转发时是否混入设置页选择的物理麦。
+    #[serde(default)]
+    pub mix_mic: bool,
 }
 
 /// 三路混音增益。
