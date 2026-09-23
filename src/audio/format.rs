@@ -116,6 +116,31 @@ pub struct Converter {
 }
 
 impl Converter {
+    /// 把源 f32 直接转换到目标 f32，供多输出 fan-out 使用。
+    pub fn convert_f32(&mut self, samples: &[f32], frames: usize, out: &mut Vec<f32>) {
+        out.clear();
+        self.decoded.clear();
+        self.decoded.extend_from_slice(&samples[..samples.len().min(frames.saturating_mul(self.src.channels as usize))]);
+        self.mixed.clear();
+        mix_channels(&self.decoded, self.src.channels as usize, self.dst.channels as usize, &mut self.mixed);
+        if self.src.sample_rate == self.dst.sample_rate { out.extend_from_slice(&self.mixed); return; }
+        self.hold.extend_from_slice(&self.mixed);
+        let dst_ch = self.dst.channels as usize;
+        let src_frames = self.hold.len() / dst_ch;
+        if src_frames < 2 { return; }
+        let step = f64::from(self.src.sample_rate) / f64::from(self.dst.sample_rate);
+        while self.pos + 1.0 < src_frames as f64 {
+            let i = self.pos.floor() as usize;
+            let frac = (self.pos - i as f64) as f32;
+            let a = i * dst_ch;
+            let b = (i + 1) * dst_ch;
+            for ch in 0..dst_ch { out.push(self.hold[a + ch] * (1.0 - frac) + self.hold[b + ch] * frac); }
+            self.pos += step;
+        }
+        let drop_frames = self.pos.floor() as usize;
+        let drop = drop_frames.min(src_frames.saturating_sub(1)) * dst_ch;
+        if drop > 0 { self.hold.drain(..drop); self.pos -= drop_frames.min(src_frames.saturating_sub(1)) as f64; }
+    }
     /// 预分配 decode/mix 缓冲，避免音频循环扩容。
     pub fn new(src: AudioFormat, dst: AudioFormat) -> Self {
         Self {
