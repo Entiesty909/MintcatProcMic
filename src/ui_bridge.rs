@@ -1,12 +1,16 @@
 //! Slint 桥：分页界面、列表填充、状态轮询、热键。
 
 use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use slint::{ModelRc, Timer, TimerMode, VecModel};
+use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OPENFILENAMEW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST};
+use windows::core::{PCWSTR, PWSTR};
 
 use crate::audio::device::{self, DestDevice};
 use crate::audio::policy;
@@ -21,7 +25,9 @@ slint::include_modules!();
 
 /// 声纹柱数量。
 const WAVE_BARS: usize = 32;
-
+/// 首选窗口尺寸（逻辑像素）。
+const WINDOW_W: f32 = 1080.0;
+const WINDOW_H: f32 = 560.0;
 /// UI 列表缓存。当前项按 pid / 设备 ID 记住，不拿 ComboBox 下标当身份。
 #[derive(Default)]
 struct UiCache {
@@ -41,24 +47,27 @@ struct UiCache {
     all_devices: bool,
     /// 是否把虚拟麦设成系统默认麦克风。
     set_default_mic: bool,
+    /// 音频库条目。
+    audio_entries: Vec<config::AudioEntry>,
+    /// 当前分类。
+    audio_category: String,
+    /// 搜索关键字。
+    audio_search: String,
 }
-
-/// 首选窗口尺寸（逻辑像素）。实际会按显示器工作区收窄。
-const WINDOW_W: f32 = 1080.0;
-const WINDOW_H: f32 = 560.0;
-
 /// 创建窗口、填列表、跑事件循环。退出时还原默认麦并停引擎。
 pub fn run_ui() -> Result<(), Error> {
     let Some(_instance) = config::acquire_single_instance()? else {
         return Ok(());
     };
     let ui = MainWindow::new().map_err(|e| Error::InvalidArgs(e.to_string()))?;
-    let engine = Rc::new(AudioEngine::new());
     let app_config = Rc::new(RefCell::new(config::load()));
     let persisted = app_config.borrow().clone();
+    let engine = Rc::new(AudioEngine::new());
     let cache = Rc::new(RefCell::new(UiCache {
         all_devices: persisted.output.all_devices,
         set_default_mic: persisted.output.set_default_mic,
+        audio_entries: persisted.audio_entries.clone(),
+        audio_category: "全部".into(),
         ..UiCache::default()
     }));
     let saved_mics = Rc::new(RefCell::new(Vec::<(u32, String)>::new()));
@@ -77,12 +86,16 @@ pub fn run_ui() -> Result<(), Error> {
         });
     }
     ui.set_volume((persisted.mix.process * 100.0).clamp(0.0, 100.0));
+    ui.set_mic_volume((persisted.mix.mic * 100.0).clamp(0.0, 100.0));
+    ui.set_master_volume((persisted.mix.master * 100.0).clamp(0.0, 100.0));
     ui.window()
         .show()
         .map_err(|e| Error::InvalidArgs(e.to_string()))?;
     fit_window_to_screen(&ui);
     refill(&ui, &cache, true);
     restore_saved_selection(&ui, &cache, &persisted);
+    ui.set_audio_categories(ModelRc::new(VecModel::from(audio_categories(&cache))));
+    update_audio_list(&ui, &cache);
     set_wave(
         &ui,
         &capture_hist.borrow(),
@@ -321,6 +334,68 @@ fn wire_callbacks(
     }
     {
         let ui_weak = ui.as_weak();
+        let cache = cache.clone();
+        let app_config = app_config.clone();
+        ui.on_add_audio_files(move || {
+            let Some(path) = select_audio_file() else { return; };
+            let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("音频").to_string();
+            let entry = config::AudioEntry { name, path: path.to_string_lossy().into_owned(), category: "未分类".into(), loop_playback: false };
+            cache.borrow_mut().audio_entries.push(entry);
+            let entries = cache.borrow().audio_entries.clone();
+            app_config.borrow_mut().audio_entries = entries;
+            config::save(&app_config.borrow());
+            if let Some(ui) = ui_weak.upgrade() { update_audio_list(&ui, &cache); }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let cache = cache.clone();
+        ui.on_audio_category_changed(move |index| {
+            let categories = audio_categories(&cache);
+            if let Some(category) = categories.get(index as usize) { cache.borrow_mut().audio_category = category.to_string(); }
+            if let Some(ui) = ui_weak.upgrade() { update_audio_list(&ui, &cache); }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let cache = cache.clone();
+        ui.on_audio_search_changed(move |text| {
+            cache.borrow_mut().audio_search = text.to_string();
+            if let Some(ui) = ui_weak.upgrade() { update_audio_list(&ui, &cache); }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let engine = engine.clone();
+        let cache = cache.clone();
+        ui.on_audio_entry_double_clicked(move |index| {
+            let entry = {
+                let c = cache.borrow();
+                let category = c.audio_category.clone();
+                let search = c.audio_search.to_ascii_lowercase();
+                c.audio_entries.iter().filter(|e| (category == "全部" || e.category == category) && (search.is_empty() || e.name.to_ascii_lowercase().contains(&search))).nth(index as usize).cloned()
+            };
+            let Some(entry) = entry else { return; };
+            match crate::audio::decode::open(std::path::Path::new(&entry.path)).and_then(|reader| reader.read_all()) {
+                Ok(data) => {
+                    let command = crate::audio::sfx::SfxCommand::Play { data: Arc::new(data), mode: if entry.loop_playback { crate::audio::sfx::SfxMode::Loop } else { crate::audio::sfx::SfxMode::Once }, volume: 1.0 };
+                    if let Ok(sender) = engine.sfx_sender() { let _ = sender.send(command); }
+                    if let Some(ui) = ui_weak.upgrade() { ui.set_audio_current_name(entry.name.into()); ui.set_player_playing(true); }
+                }
+                Err(error) => if let Some(ui) = ui_weak.upgrade() { ui.set_error_text(error.user_message().into()); },
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let engine = engine.clone();
+        ui.on_audio_stop(move || {
+            if let Ok(sender) = engine.sfx_sender() { let _ = sender.send(crate::audio::sfx::SfxCommand::StopAll); }
+            if let Some(ui) = ui_weak.upgrade() { ui.set_player_playing(false); }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
         let engine = engine.clone();
         let cache = cache.clone();
         let saved_mics = saved_mics.clone();
@@ -328,13 +403,7 @@ fn wire_callbacks(
         ui.on_start_stop(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
             if engine.is_running() {
-                engine.stop();
-                restore_default_mics(&saved_mics);
-                ui.set_running(false);
-                ui.set_status_text("未运行".into());
-                ui.set_status_kind(0);
-                ui.set_error_text("".into());
-                return;
+                engine.stop(); restore_default_mics(&saved_mics); ui.set_running(false); ui.set_status_text("未运行".into()); ui.set_status_kind(0); ui.set_error_text("".into()); return;
             }
             let (pid, dest, mic_id, set_default, process_name) = {
                 let c = cache.borrow();
@@ -345,36 +414,11 @@ fn wire_callbacks(
                 let process_name = pid.and_then(|pid| c.processes.iter().find(|p| p.pid == pid).map(|p| p.name.clone()));
                 (pid, dest, mic_id, c.set_default_mic, process_name)
             };
-            let (Some(pid), Some(dest)) = (pid, dest) else {
-                ui.set_error_text("请选择进程和输出设备".into());
-                return;
-            };
-            engine.set_volume(ui.get_volume() / 100.0);
-            engine.set_mic_volume(ui.get_mic_volume() / 100.0);
-            engine.set_master_volume(ui.get_master_volume() / 100.0);
+            let (Some(pid), Some(dest)) = (pid, dest) else { ui.set_error_text("请选择进程和输出设备".into()); return; };
+            engine.set_volume(ui.get_volume() / 100.0); engine.set_mic_volume(ui.get_mic_volume() / 100.0); engine.set_master_volume(ui.get_master_volume() / 100.0);
             match engine.start(pid, &dest.render_id, mic_id.as_deref()) {
-                Ok(()) => {
-                    let mut config = app_config.borrow_mut();
-                    config.route.process_name = process_name;
-                    config.output.device_id = Some(dest.render_id.clone());
-                    config.output.device_name = Some(dest.label.clone());
-                    config.output.mic_id = dest.capture_id.clone();
-                    config.output.mic_name = dest.capture_name.clone();
-                    config.output.set_default_mic = set_default;
-                    config::save(&config);
-                    ui.set_running(true);
-                    ui.set_status_text("运行中".into());
-                    ui.set_status_kind(1);
-                    ui.set_error_text("".into());
-                    apply_virtual_mic_route(&ui, &dest, set_default, &saved_mics);
-                }
-                Err(e) => {
-                    tracing::warn!("start failed: {e}");
-                    ui.set_running(false);
-                    ui.set_status_text("错误".into());
-                    ui.set_status_kind(3);
-                    ui.set_error_text(e.user_message().into());
-                }
+                Ok(()) => { let mut config = app_config.borrow_mut(); config.route.process_name = process_name; config.output.device_id = Some(dest.render_id.clone()); config.output.device_name = Some(dest.label.clone()); config.output.mic_id = dest.capture_id.clone(); config.output.mic_name = dest.capture_name.clone(); config.output.set_default_mic = set_default; config::save(&config); ui.set_running(true); ui.set_status_text("运行中".into()); ui.set_status_kind(1); ui.set_error_text("".into()); apply_virtual_mic_route(&ui, &dest, set_default, &saved_mics); }
+                Err(e) => { tracing::warn!("start failed: {e}"); ui.set_running(false); ui.set_status_text("错误".into()); ui.set_status_kind(3); ui.set_error_text(e.user_message().into()); }
             }
         });
     }
@@ -669,13 +713,13 @@ fn restore_saved_selection(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>, saved:
         }
     }
     update_output_text(ui, cache);
-    update_mic_text(ui, cache);
 }
 
 /// 退出前写回当前选择与混音值。
 fn persist_config(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>, app_config: &Rc<RefCell<config::AppConfig>>) {
-    let mut saved = app_config.borrow_mut();
     let c = cache.borrow();
+    let mut saved = app_config.borrow_mut();
+    saved.audio_entries = c.audio_entries.clone();
     saved.output.all_devices = c.all_devices;
     saved.output.set_default_mic = c.set_default_mic;
     saved.output.device_id = c.dests.get(ui.get_device_index() as usize).map(|d| d.render_id.clone());
@@ -699,9 +743,7 @@ fn update_output_text(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>) {
             ui.set_output_name(d.label.clone().into());
             ui.set_show_set_default_mic(d.capture_id.is_some());
             let hint = match d.capture_name.as_deref() {
-                Some(name) => {
-                    format!("虚拟麦克风「{name}」。游戏里把麦克风选成它，队友就能听到。")
-                }
+                Some(name) => format!("虚拟麦克风「{name}」。游戏里把麦克风选成它，队友就能听到。"),
                 None => "虚拟扬声器。声音播到这只设备。".to_string(),
             };
             ui.set_dest_hint(hint.into());
@@ -714,6 +756,29 @@ fn update_output_text(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>) {
     }
 }
 
+/// 分类树模型：全部 + 配置中出现过的分类。
+fn audio_categories(cache: &Rc<RefCell<UiCache>>) -> Vec<slint::SharedString> {
+    let c = cache.borrow();
+    let mut names = vec!["全部".to_string()];
+    for entry in &c.audio_entries {
+        if !names.iter().any(|name| name == &entry.category) { names.push(entry.category.clone()); }
+    }
+    names.into_iter().map(Into::into).collect()
+}
+
+/// 按分类与搜索词更新右侧音频列表。
+fn update_audio_list(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>) {
+    let (category, search) = { let c = cache.borrow(); (c.audio_category.clone(), c.audio_search.to_ascii_lowercase()) };
+    let c = cache.borrow();
+    let names: Vec<slint::SharedString> = c.audio_entries.iter()
+        .filter(|entry| category == "全部" || entry.category == category)
+        .filter(|entry| search.is_empty() || entry.name.to_ascii_lowercase().contains(&search))
+        .map(|entry| entry.name.clone().into()).collect();
+    drop(c);
+    ui.set_audio_entries(ModelRc::new(VecModel::from(names)));
+    ui.set_audio_entry_index(-1);
+}
+
 fn about_text(cache: &Rc<RefCell<UiCache>>) -> String {
     let c = cache.borrow();
     format!(
@@ -722,6 +787,22 @@ fn about_text(cache: &Rc<RefCell<UiCache>>) -> String {
         c.dests.len(),
         c.processes.len()
     )
+}
+
+/// 使用 Windows 原生文件选择器选择音频文件。
+fn select_audio_file() -> Option<PathBuf> {
+    let mut file = [0u16; 32_768];
+    let filter: Vec<u16> = "音频文件\0*.wav;*.mp3;*.mp4;*.m4a;*.flac;*.wma\0所有文件\0*.*\0\0".encode_utf16().collect();
+    let mut dialog = OPENFILENAMEW::default();
+    dialog.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+    dialog.hwndOwner = HWND::default();
+    dialog.lpstrFilter = PCWSTR(filter.as_ptr());
+    dialog.lpstrFile = PWSTR(file.as_mut_ptr());
+    dialog.nMaxFile = file.len() as u32;
+    dialog.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    if !unsafe { GetOpenFileNameW(&mut dialog).as_bool() } { return None; }
+    let len = file.iter().position(|v| *v == 0).unwrap_or(file.len());
+    Some(PathBuf::from(String::from_utf16_lossy(&file[..len])))
 }
 
 /// 开始转发时按勾选切换系统默认麦，失败只提示，不影响转发。

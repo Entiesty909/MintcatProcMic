@@ -144,7 +144,24 @@ pub struct PlaybackKeyAction {
     pub key: Hotkey,
 }
 
-/// 一个声板 pad 的持久化描述。
+/// 音频库中的一项。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AudioEntry {
+    /// 显示名。
+    pub name: String,
+    /// 文件路径。
+    pub path: String,
+    /// 所属分类。
+    #[serde(default = "default_category")]
+    pub category: String,
+    /// 是否循环。
+    #[serde(default)]
+    pub loop_playback: bool,
+}
+
+fn default_category() -> String { "未分类".into() }
+
+/// 兼容旧版本的声板条目；音频库新条目使用 `AudioEntry`。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PadConfig {
     /// 显示名。
@@ -191,6 +208,9 @@ pub struct AppConfig {
     pub pads: Vec<PadConfig>,
     /// 播放器。
     pub player: PlayerConfig,
+    /// 音频库条目。
+    #[serde(default)]
+    pub audio_entries: Vec<AudioEntry>,
     /// 全局播放时按键动作；S4/S6 执行，默认不模拟。
     #[serde(default)]
     pub playback_key: Option<PlaybackKeyAction>,
@@ -206,6 +226,7 @@ impl Default for AppConfig {
             hotkeys: Hotkeys::default(),
             pads: Vec::new(),
             player: PlayerConfig::default(),
+            audio_entries: Vec::new(),
             playback_key: None,
         }
     }

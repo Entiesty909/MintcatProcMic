@@ -41,8 +41,13 @@ export component MainWindow inherits Window {
     in-out property <string> player-file-path: "";
     in-out property <bool> player-loop: false;
     in-out property <bool> player-playing: false;
-    in-out property <string> playback-key-label: "未设置";
-    in-out property <int> playback-key-mode: 0;
+    in-out property <[string]> audio-categories: ["全部", "未分类"];
+    in-out property <int> audio-category-index: 0;
+    in-out property <[string]> audio-entries: [];
+    in-out property <int> audio-entry-index: -1;
+    in-out property <string> audio-search: "";
+    in-out property <string> audio-current-name: "";
+    in-out property <string> audio-current-position: "";
     in-out property <[string]> devices: [];
     in-out property <int> device-index: 0;
     in-out property <bool> all-devices: false;
@@ -51,6 +56,8 @@ export component MainWindow inherits Window {
     in-out property <bool> show-set-default-mic: false;
     in-out property <bool> set-default-mic: false;
     in-out property <string> dest-hint: "";
+    in-out property <string> playback-key-label: "未设置";
+    in-out property <int> playback-key-mode: 0;
 
     // 虚拟线缆
     in-out property <bool> cable-installed: false;
@@ -74,10 +81,15 @@ export component MainWindow inherits Window {
     callback process-filter-changed(string);
     callback all-devices-toggled(bool);
     callback set-default-mic-toggled(bool);
-    callback hotkey-captured(string, bool, bool, bool);
     callback install-cable();
     callback begin-hotkey-capture();
     callback reset-hotkey();
+    callback hotkey-captured(string, bool, bool, bool);
+    callback add-audio-files();
+    callback audio-category-changed(int);
+    callback audio-search-changed(string);
+    callback audio-entry-double-clicked(int);
+    callback audio-stop();
     callback playback-key-mode-toggled(int);
     FocusScope {
         key-pressed(event) => {
@@ -170,11 +182,20 @@ export component MainWindow inherits Window {
                     min-width: 0px;
                     min-height: 0px;
                     output-name <=> root.output-name;
-                    file-path <=> root.player-file-path;
+                    categories <=> root.audio-categories;
+                    category-index <=> root.audio-category-index;
+                    entries <=> root.audio-entries;
+                    entry-index <=> root.audio-entry-index;
+                    search <=> root.audio-search;
+                    current-name <=> root.audio-current-name;
+                    current-position <=> root.audio-current-position;
                     loop <=> root.player-loop;
                     playing <=> root.player-playing;
-                    file-path-edited(t) => { root.player-file-path = t; }
-                    play-stop => { root.start-stop(); }
+                    category-changed(i) => { root.audio-category-changed(i); }
+                    search-changed(t) => { root.audio-search-changed(t); }
+                    entry-double-clicked(i) => { root.audio-entry-double-clicked(i); }
+                    add-files => { root.add-audio-files(); }
+                    stop => { root.audio-stop(); }
                     open-settings => { root.page = 2; }
                 }
 

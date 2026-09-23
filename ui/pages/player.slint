@@ -1,4 +1,4 @@
-//! 播放器页：输入本地文件路径，送入当前输出的 SFX 总线。
+//! 音频库：左侧分类树，右侧音频列表，底部迷你播放条。
 
 import { LineEdit, CheckBox } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
@@ -7,68 +7,93 @@ import { PmButton } from "../components/button.slint";
 
 export component PlayerPage inherits Rectangle {
     in-out property <string> output-name: "";
-    in-out property <string> file-path: "";
+    in-out property <[string]> categories: ["全部", "未分类"];
+    in-out property <int> category-index: 0;
+    in-out property <[string]> entries: [];
+    in-out property <int> entry-index: -1;
+    in-out property <string> search: "";
+    in-out property <string> current-name: "";
+    in-out property <string> current-position: "";
     in-out property <bool> loop: false;
     in-out property <bool> playing: false;
 
-    callback file-path-edited(string);
-    callback play-stop();
+    callback category-changed(int);
+    callback search-changed(string);
+    callback entry-double-clicked(int);
+    callback add-files();
+    callback stop();
     callback open-settings();
 
     background: transparent;
 
     VerticalLayout {
         padding: Theme.padPage;
-        spacing: Theme.gapLg;
-
-        Card {
-            VerticalLayout {
-                vertical-stretch: 0;
-                Text { text: "本地文件转发"; color: Theme.text2; font-size: 12px; font-weight: 600; }
-                Text {
-                    text: "支持 WAV，以及系统 Media Foundation 能解码的 MP3 / MP4 / M4A / FLAC / WMA。只读取音轨，不播放视频画面。";
-                    color: Theme.text3;
-                    font-size: 12px;
-                    wrap: word-wrap;
+        spacing: Theme.gap;
+        HorizontalLayout {
+            height: Theme.controlHeight;
+            spacing: 8px;
+            PmButton { label: "+ 添加文件"; clicked => { root.add-files(); } }
+            LineEdit { horizontal-stretch: 1; placeholder-text: "搜索音频…"; text <=> root.search; edited(t) => { root.search-changed(t); } }
+            Text { text: root.output-name == "" ? "目标：未选择" : "目标：" + root.output-name; color: Theme.text2; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; }
+        }
+        HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: Theme.gap;
+            Card {
+                width: 230px;
+                VerticalLayout {
+                    Text { text: "音频分类"; color: Theme.text2; font-size: 12px; font-weight: 600; }
+                    VerticalLayout {
+                        vertical-stretch: 1;
+                        for category[index] in root.categories: Rectangle {
+                            height: 32px;
+                            background: index == root.category-index ? Theme.accentSoft : transparent;
+                            border-radius: Theme.radiusControl;
+                            Text { text: category; x: 12px; color: index == root.category-index ? Theme.accent : Theme.text; vertical-alignment: TextVerticalAlignment.center; }
+                            TouchArea { clicked => { root.category-changed(index); } }
+                        }
+                    }
                 }
-                HorizontalLayout {
-                    spacing: 8px;
-                    LineEdit {
-                        horizontal-stretch: 1;
-                        placeholder-text: "粘贴本地音频或 MP4 路径…";
-                        text <=> root.file-path;
-                        edited(t) => { root.file-path-edited(t); }
+            }
+            Card {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                VerticalLayout {
+                    HorizontalLayout {
+                        height: Theme.controlHeight;
+                        Text { text: "索引"; width: 52px; color: Theme.text2; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; }
+                        Text { text: "音频名称"; horizontal-stretch: 1; color: Theme.text2; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; }
+                        Text { text: "状态"; width: 64px; color: Theme.text2; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; }
                     }
-                    PmButton {
-                        label: root.playing ? "停止" : "播放到麦克风";
-                        filled: !root.playing;
-                        danger: root.playing;
-                        clicked => { root.play-stop(); }
+                    VerticalLayout {
+                        vertical-stretch: 1;
+                        for name[index] in root.entries: Rectangle {
+                            height: 32px;
+                            background: index == root.entry-index ? Theme.accentSoft : transparent;
+                            border-radius: Theme.radiusControl;
+                            Text { text: "\{index + 1}"; x: 8px; width: 44px; color: Theme.text2; vertical-alignment: TextVerticalAlignment.center; }
+                            Text { text: name; x: 56px; width: parent.width - 130px; color: Theme.text; vertical-alignment: TextVerticalAlignment.center; overflow: elide; }
+                            Text { text: index == root.entry-index && root.playing ? "播放中" : ""; x: parent.width - 66px; width: 58px; color: Theme.accent; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; }
+                            TouchArea { clicked => { root.entry-double-clicked(index); } }
+                        }
                     }
-                }
-                HorizontalLayout {
-                    spacing: 12px;
-                    CheckBox { text: "循环播放"; checked <=> root.loop; }
-                    Text {
-                        text: root.output-name == "" ? "请先在路由页开始转发" : "输出：" + root.output-name;
-                        color: Theme.text2;
-                        font-size: 12px;
-                        vertical-alignment: TextVerticalAlignment.center;
-                    }
+                    Text { text: "双击音频名称播放；长标题在列内截断。"; color: Theme.text3; font-size: 12px; }
                 }
             }
         }
-
         Card {
-            vertical-stretch: 1;
-            Text { text: "播放时按键在设置页配置"; color: Theme.text; font-size: 15px; font-weight: 600; }
-            Text {
-                text: "这里的动作是全局播放行为：不按键、播放开始时按一次，或播放期间保持按下。适合游戏 PTT；默认关闭，启用模拟输入前会显示风险提示。";
-                color: Theme.text2;
-                font-size: 13px;
-                wrap: word-wrap;
+            height: 62px;
+            VerticalLayout {
+                HorizontalLayout {
+                    height: Theme.controlHeight;
+                    spacing: 8px;
+                    Text { text: root.playing ? "▶" : "■"; width: 20px; color: root.playing ? Theme.accent : Theme.text3; vertical-alignment: TextVerticalAlignment.center; }
+                    Text { text: root.current-name == "" ? "未播放" : root.current-name; horizontal-stretch: 1; color: Theme.text; font-weight: 600; vertical-alignment: TextVerticalAlignment.center; overflow: elide; }
+                    Text { text: root.current-position; width: 100px; color: Theme.text2; vertical-alignment: TextVerticalAlignment.center; }
+                    CheckBox { text: "循环"; checked <=> root.loop; }
+                    PmButton { label: "停止"; enabled: root.playing; clicked => { root.stop(); } }
+                }
             }
-            PmButton { label: "去设置"; clicked => { root.open-settings(); } }
         }
     }
 }
