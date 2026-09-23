@@ -3,7 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -85,9 +85,9 @@ pub fn run_ui() -> Result<(), Error> {
     let capture_hist = Rc::new(RefCell::new(vec![0.0f32; WAVE_BARS]));
     let mic_hist = Rc::new(RefCell::new(vec![0.0f32; WAVE_BARS]));
     let render_hist = Rc::new(RefCell::new(vec![0.0f32; WAVE_BARS]));
-    let preview = Rc::new(RefCell::new(if persisted.preview_enabled { crate::audio::preview::PreviewEngine::open_default().ok() } else { None }));
+    let preview = Arc::new(Mutex::new(if persisted.preview_enabled { crate::audio::preview::PreviewEngine::open_default().ok() } else { None }));
+    if let Ok(guard) = preview.lock() { if let Some(p) = guard.as_ref() { p.set_volume(persisted.preview_volume); } }
     let hotkey = Rc::new(RefCell::new(persisted.hotkeys.toggle_route));
-    ui.set_hotkey_label(hotkey.borrow().label().into());
     if let Some(action) = persisted.playback_key {
         ui.set_playback_key_label(action.key.label().into());
         ui.set_playback_key_mode(match action.mode {
@@ -194,7 +194,7 @@ fn wire_callbacks(
     hotkey: &Rc<RefCell<config::Hotkey>>,
     hotkey_server: &Rc<HotkeyServer>,
     app_config: &Rc<RefCell<config::AppConfig>>,
-    preview: &Rc<RefCell<Option<crate::audio::preview::PreviewEngine>>>,
+    preview: &Arc<Mutex<Option<crate::audio::preview::PreviewEngine>>>,
 ) {
     {
         let engine = engine.clone();
@@ -253,14 +253,14 @@ fn wire_callbacks(
         let preview = preview.clone(); let app_config = app_config.clone();
         ui.on_preview_enabled_toggled(move |enabled| {
             app_config.borrow_mut().preview_enabled = enabled;
-            if enabled && preview.borrow().is_none() { *preview.borrow_mut() = crate::audio::preview::PreviewEngine::open_default().ok(); }
-            if !enabled { preview.borrow_mut().take(); }
+            if enabled && preview.lock().ok().is_some_and(|p| p.is_none()) { *preview.lock().unwrap() = crate::audio::preview::PreviewEngine::open_default().ok(); }
+            if !enabled { preview.lock().ok().and_then(|mut p| p.take()); }
             config::save(&app_config.borrow());
         });
     }
     {
         let preview = preview.clone(); let app_config = app_config.clone();
-        ui.on_preview_volume_edited(move |v| { let value = (v / 100.0).clamp(0.0, 1.0); if let Some(engine) = preview.borrow().as_ref() { engine.set_volume(value); } app_config.borrow_mut().preview_volume = value; config::save(&app_config.borrow()); });
+        ui.on_preview_volume_edited(move |v| { let value = (v / 100.0).clamp(0.0, 1.0); if let Ok(guard) = preview.lock() { if let Some(engine) = guard.as_ref() { engine.set_volume(value); } } app_config.borrow_mut().preview_volume = value; config::save(&app_config.borrow()); });
     }
     {
         let cache = cache.clone();
@@ -423,8 +423,9 @@ fn wire_callbacks(
         ui.on_audio_category_context(move |_| {
             let mut c = cache.borrow_mut();
             let name = format!("新分类 {}", c.audio_categories.len() + 1);
-            if !c.audio_entries.iter().any(|e| e.category == name) { c.audio_entries.push(config::AudioEntry { name: String::new(), path: String::new(), category: name.clone(), loop_playback: false }); }
-            app_config.borrow_mut().audio_categories.push(name);
+            if !c.audio_categories.contains(&name) { c.audio_categories.push(name.clone()); }
+            app_config.borrow_mut().audio_categories = c.audio_categories.clone();
+            config::save(&app_config.borrow());
             if let Some(ui) = ui_weak.upgrade() { ui.set_audio_categories(ModelRc::new(VecModel::from(audio_categories(&cache)))); }
         });
     }
@@ -439,25 +440,29 @@ fn wire_callbacks(
     {
         let ui_weak = ui.as_weak();
         let engine = engine.clone();
-        let cache = cache.clone();
+        let preview = preview.clone();
+        let cache_for_callback = cache.clone();
         ui.on_audio_entry_double_clicked(move |index| {
             let entry = {
-                let c = cache.borrow();
+                let c = cache_for_callback.borrow();
                 let category = c.audio_category.clone();
                 let search = c.audio_search.to_ascii_lowercase();
                 c.audio_entries.iter().filter(|e| (category == "全部" || e.category == category) && (search.is_empty() || e.name.to_ascii_lowercase().contains(&search))).nth(index as usize).cloned()
             };
             let Some(entry) = entry else { return; };
             let sender = engine.sfx_sender().ok();
-            let ui_weak = ui_weak.clone();
+            let preview = preview.clone();
             let looped = entry.loop_playback;
+            let ui_for_worker = ui_weak.clone();
             thread::spawn(move || {
                 match crate::audio::decode::open(std::path::Path::new(&entry.path)).and_then(|reader| reader.read_all()) {
                     Ok(data) => {
-                        if let Some(sender) = sender { let _ = sender.send(crate::audio::sfx::SfxCommand::Play { data: Arc::new(data), mode: if looped { crate::audio::sfx::SfxMode::Loop } else { crate::audio::sfx::SfxMode::Once }, volume: 1.0 }); }
-                        let _ = slint::invoke_from_event_loop(move || { if let Some(ui) = ui_weak.upgrade() { ui.set_audio_current_name(entry.name.into()); ui.set_player_playing(true); } });
+                        let data = Arc::new(data);
+                        if let Some(sender) = sender { let _ = sender.send(crate::audio::sfx::SfxCommand::Play { data: data.clone(), mode: if looped { crate::audio::sfx::SfxMode::Loop } else { crate::audio::sfx::SfxMode::Once }, volume: 1.0 }); }
+                        if let Ok(guard) = preview.lock() { if let Some(preview) = guard.as_ref() { preview.play(data, looped); } }
+                        let _ = slint::invoke_from_event_loop(move || { if let Some(ui) = ui_for_worker.upgrade() { ui.set_audio_current_name(entry.name.into()); ui.set_player_playing(true); } });
                     }
-                    Err(error) => { let _ = slint::invoke_from_event_loop(move || { if let Some(ui) = ui_weak.upgrade() { ui.set_error_text(error.user_message().into()); } }); }
+                    Err(error) => { let _ = slint::invoke_from_event_loop(move || { if let Some(ui) = ui_for_worker.upgrade() { ui.set_error_text(error.user_message().into()); } }); }
                 }
             });
         });
@@ -465,8 +470,10 @@ fn wire_callbacks(
     {
         let ui_weak = ui.as_weak();
         let engine = engine.clone();
+        let preview = preview.clone();
         ui.on_audio_stop(move || {
             if let Ok(sender) = engine.sfx_sender() { let _ = sender.send(crate::audio::sfx::SfxCommand::StopAll); }
+            if let Ok(guard) = preview.lock() { if let Some(preview) = guard.as_ref() { preview.stop_source(); } }
             if let Some(ui) = ui_weak.upgrade() { ui.set_player_playing(false); }
         });
     }
