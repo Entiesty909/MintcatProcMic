@@ -100,9 +100,9 @@ pub fn run_ui() -> Result<(), Error> {
     ui.set_volume((persisted.mix.process * 100.0).clamp(0.0, 100.0));
     ui.set_mic_volume((persisted.mix.mic * 100.0).clamp(0.0, 100.0));
     ui.set_master_volume((persisted.mix.master * 100.0).clamp(0.0, 100.0));
+    ui.set_preview_enabled(persisted.preview_enabled);
+    ui.set_preview_volume((persisted.preview_volume * 100.0).clamp(0.0, 100.0));
     ui.set_mix_mic(persisted.route.mix_mic);
-    ui.set_set_default_render(persisted.output.set_default_render);
-    ui.set_set_default_communications(persisted.output.set_default_communications);
     ui.window()
         .show()
         .map_err(|e| Error::InvalidArgs(e.to_string()))?;
@@ -493,22 +493,25 @@ fn wire_callbacks(
             if engine.is_running() {
                 engine.stop(); restore_default_mics(&saved_mics); ui.set_running(false); ui.set_status_text("未运行".into()); ui.set_status_kind(0); ui.set_error_text("".into()); return;
             }
-            let (pid, extra_pids, dest, mic_id, set_default, process_name, process_names, mix_mic) = {
+            let (pid, extra_pids, dest, output_ids, mic_id, set_default, process_name, process_names, mix_mic) = {
                 let c = cache.borrow();
                 let pid = c.pids.get(ui.get_process_index() as usize).copied().filter(|p| *p != 0);
                 let mut selected = c.selected_pids.clone();
                 if selected.is_empty() { if let Some(pid) = pid { selected.push(pid); } }
                 let primary = selected.first().copied().or(pid);
                 let extra = selected.iter().skip(1).copied().collect::<Vec<_>>();
-                let dest = c.dests.get(ui.get_device_index() as usize).cloned();
+                let dest_index = ui.get_device_index() as usize;
+                let dest = c.dests.get(dest_index).cloned();
+                let output_ids = c.dests.iter().enumerate().filter(|(i, _)| c.device_selected.get(*i).copied().unwrap_or(false)).map(|(_, d)| d.render_id.clone()).collect::<Vec<_>>();
+                let output_ids = if output_ids.is_empty() { dest.as_ref().map(|d| vec![d.render_id.clone()]).unwrap_or_default() } else { output_ids };
                 let mic_index = ui.get_mic_index() as usize;
                 let mic_id = if ui.get_mix_mic() { c.mic_ids.get(mic_index).filter(|s| !s.is_empty()).cloned() } else { None };
                 let names = selected.iter().filter_map(|pid| c.processes.iter().find(|p| p.pid == *pid).map(|p| p.name.clone())).collect::<Vec<_>>();
-                (primary, extra, dest, mic_id, c.set_default_mic, names.first().cloned(), names, ui.get_mix_mic())
+                (primary, extra, dest, output_ids, mic_id, c.set_default_mic, names.first().cloned(), names, ui.get_mix_mic())
             };
             let (Some(pid), Some(dest)) = (pid, dest) else { ui.set_error_text("请选择进程和输出设备".into()); return; };
             engine.set_volume(ui.get_volume() / 100.0); engine.set_mic_volume(ui.get_mic_volume() / 100.0); engine.set_master_volume(ui.get_master_volume() / 100.0);
-            let start_result = engine.open_output(&dest.render_id)
+            let start_result = engine.open_outputs(&output_ids)
                 .and_then(|_| engine.set_process_source(pid))
                 .and_then(|_| { for (slot, extra_pid) in extra_pids.iter().enumerate() { engine.add_process_source(*extra_pid, slot + 1)?; } engine.set_mic_source(mic_id.as_deref()) });
             match start_result {
@@ -761,9 +764,15 @@ fn refill_devices(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>, initial: bool) 
         (labels, idx, cable, picked_is_mic)
     };
 
+    let selected = {
+        let c = cache.borrow();
+        if c.device_selected.len() == c.dests.len() { c.device_selected.clone() } else { vec![false; c.dests.len()] }
+    };
+    let selected = if selected.iter().any(|v| *v) { selected } else { vec![false; cache.borrow().dests.len()] };
+    cache.borrow_mut().device_selected = selected.clone();
+    ui.set_device_selected(ModelRc::new(VecModel::from(selected)));
     ui.set_devices(ModelRc::new(VecModel::from(labels)));
     ui.set_device_index(idx as i32);
-    ui.set_cable_installed(cable);
     if cable {
         ui.set_cable_text("VB-CABLE 已安装".into());
     } else if !ui.get_cable_busy() {
