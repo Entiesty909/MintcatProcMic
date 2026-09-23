@@ -171,6 +171,7 @@ pub struct AudioEntry {
 }
 
 fn default_category() -> String { "未分类".into() }
+fn default_preview_volume() -> f32 { 0.5 }
 
 /// 兼容旧版本的声板条目；音频库新条目使用 `AudioEntry`。
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -218,7 +219,14 @@ pub struct AppConfig {
     /// 声板 pad。
     pub pads: Vec<PadConfig>,
     /// 播放器。
+    /// 播放器兼容状态。
     pub player: PlayerConfig,
+    /// 是否把音频库播放同时送到本机预览设备。
+    #[serde(default)]
+    pub preview_enabled: bool,
+    /// 本机预览音量 0..=1。
+    #[serde(default = "default_preview_volume")]
+    pub preview_volume: f32,
     /// 自定义音频分类树节点。
     #[serde(default)]
     pub audio_categories: Vec<String>,
@@ -240,6 +248,8 @@ impl Default for AppConfig {
             hotkeys: Hotkeys::default(),
             pads: Vec::new(),
             player: PlayerConfig::default(),
+            preview_enabled: false,
+            preview_volume: 0.5,
             audio_categories: Vec::new(),
             audio_entries: Vec::new(),
             playback_key: None,

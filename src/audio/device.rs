@@ -93,6 +93,11 @@ pub fn default_capture_ids() -> Vec<(u32, String)> {
     out
 }
 
+/// 当前默认播放端的 console role 设备 ID。
+pub fn default_render_id() -> Result<String, Error> {
+    default_endpoint_id(eRender, eConsole)
+}
+
 /// 当前默认播放设备 ID（三种 role）。
 pub fn default_render_ids() -> Vec<(u32, String)> {
     let mut out = Vec::new();
