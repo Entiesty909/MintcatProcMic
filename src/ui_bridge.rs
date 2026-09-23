@@ -45,15 +45,16 @@ struct UiCache {
     filter: String,
     /// 输出列表是否包含物理播放设备。
     all_devices: bool,
+    /// 多输出选择状态，与 dests 对齐。
+    device_selected: Vec<bool>,
     /// 当前已加入混音的进程 PID。
     selected_pids: Vec<u32>,
     /// 是否设置系统默认麦。
     set_default_mic: bool,
-    /// 是否设置系统默认播放。
+    /// 是否设置默认播放设备。
     set_default_render: bool,
     /// 是否设置默认通信播放。
     set_default_communications: bool,
-    /// 自定义分类树节点。
     audio_categories: Vec<String>,
     /// 音频库条目。
     audio_entries: Vec<config::AudioEntry>,
@@ -73,8 +74,8 @@ pub fn run_ui() -> Result<(), Error> {
     let persisted = app_config.borrow().clone();
     let cache = Rc::new(RefCell::new(UiCache {
         all_devices: persisted.output.all_devices,
-        set_default_mic: persisted.output.set_default_mic,
-        set_default_render: persisted.output.set_default_render,
+        device_selected: Vec::new(),
+        selected_pids: Vec::new(),
         set_default_communications: persisted.output.set_default_communications,
         audio_categories: persisted.audio_categories.clone(),
         audio_entries: persisted.audio_entries.clone(),
@@ -248,6 +249,10 @@ fn wire_callbacks(
             app_config.borrow_mut().output.all_devices = on;
             refill_devices(&ui, &cache, false);
         });
+    }
+    {
+        let cache = cache.clone();
+        ui.on_device_toggled(move |index, checked| { if let Some(slot) = cache.borrow_mut().device_selected.get_mut(index as usize) { *slot = checked; } });
     }
     {
         let preview = preview.clone(); let app_config = app_config.clone();
