@@ -53,8 +53,11 @@ struct UiCache {
     set_default_render: bool,
     /// 是否设置默认通信播放。
     set_default_communications: bool,
+    /// 自定义分类树节点。
+    audio_categories: Vec<String>,
     /// 音频库条目。
     audio_entries: Vec<config::AudioEntry>,
+    /// 当前分类。
     audio_category: String,
     /// 搜索关键字。
     audio_search: String,
@@ -70,10 +73,10 @@ pub fn run_ui() -> Result<(), Error> {
     let persisted = app_config.borrow().clone();
     let cache = Rc::new(RefCell::new(UiCache {
         all_devices: persisted.output.all_devices,
-        selected_pids: Vec::new(),
         set_default_mic: persisted.output.set_default_mic,
         set_default_render: persisted.output.set_default_render,
         set_default_communications: persisted.output.set_default_communications,
+        audio_categories: persisted.audio_categories.clone(),
         audio_entries: persisted.audio_entries.clone(),
         audio_category: "全部".into(),
         ..UiCache::default()
@@ -416,6 +419,18 @@ fn wire_callbacks(
     {
         let ui_weak = ui.as_weak();
         let cache = cache.clone();
+        let app_config = app_config.clone();
+        ui.on_audio_category_context(move |_| {
+            let mut c = cache.borrow_mut();
+            let name = format!("新分类 {}", c.audio_categories.len() + 1);
+            if !c.audio_entries.iter().any(|e| e.category == name) { c.audio_entries.push(config::AudioEntry { name: String::new(), path: String::new(), category: name.clone(), loop_playback: false }); }
+            app_config.borrow_mut().audio_categories.push(name);
+            if let Some(ui) = ui_weak.upgrade() { ui.set_audio_categories(ModelRc::new(VecModel::from(audio_categories(&cache)))); }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let cache = cache.clone();
         ui.on_audio_search_changed(move |text| {
             cache.borrow_mut().audio_search = text.to_string();
             if let Some(ui) = ui_weak.upgrade() { update_audio_list(&ui, &cache); }
@@ -726,18 +741,10 @@ fn refill_devices(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>, initial: bool) 
             .as_deref()
             .and_then(|id| c.dests.iter().position(|d| d.render_id == id))
             .or_else(|| {
-                // 首次启动优先选虚拟麦克风：那是「送进游戏麦」最常用的目标。
-                if initial {
-                    c.dests.iter().position(|d| d.capture_id.is_some())
-                } else {
-                    None
-                }
+                if initial { c.dests.iter().position(|d| d.capture_id.is_some()) } else { None }
             })
             .unwrap_or(0);
-        let cable = c
-            .dests
-            .iter()
-            .any(|d| vbcable::device_looks_like_cable(&d.label) || d.capture_id.is_some());
+        let cable = c.dests.iter().any(|d| vbcable::device_looks_like_cable(&d.label) || d.capture_id.is_some());
         let picked_is_mic = c.dests.get(idx).is_some_and(|d| d.capture_id.is_some());
         (labels, idx, cable, picked_is_mic)
     };
@@ -757,7 +764,14 @@ fn refill_devices(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>, initial: bool) 
     update_output_text(ui, cache);
     ui.set_about_text(about_text(cache).into());
 }
-
+/// 分类树模型。
+fn audio_categories(cache: &Rc<RefCell<UiCache>>) -> Vec<slint::SharedString> {
+    let c = cache.borrow();
+    let mut names = vec!["全部".to_string(), "未分类".to_string()];
+    for name in &c.audio_categories { if !names.contains(name) { names.push(name.clone()); } }
+    for entry in &c.audio_entries { if !names.contains(&entry.category) { names.push(entry.category.clone()); } }
+    names.into_iter().map(Into::into).collect()
+}
 /// 按持久化的 ID / 名称恢复进程、输出设备与物理麦选择。
 fn restore_saved_selection(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>, saved: &config::AppConfig) {
     {
@@ -788,8 +802,8 @@ fn persist_config(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>, app_config: &Rc
     let c = cache.borrow();
     let mut saved = app_config.borrow_mut();
     saved.audio_entries = c.audio_entries.clone();
+    saved.audio_categories = c.audio_categories.clone();
     saved.output.all_devices = c.all_devices;
-    saved.output.set_default_mic = c.set_default_mic;
     saved.output.set_default_render = c.set_default_render;
     saved.output.set_default_communications = c.set_default_communications;
     saved.route.mix_mic = ui.get_mix_mic();
@@ -824,16 +838,6 @@ fn update_output_text(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>) {
             ui.set_dest_hint("输出列表是虚拟扬声器与虚拟麦克风。".into());
         }
     }
-}
-
-/// 分类树模型：全部 + 配置中出现过的分类。
-fn audio_categories(cache: &Rc<RefCell<UiCache>>) -> Vec<slint::SharedString> {
-    let c = cache.borrow();
-    let mut names = vec!["全部".to_string()];
-    for entry in &c.audio_entries {
-        if !names.iter().any(|name| name == &entry.category) { names.push(entry.category.clone()); }
-    }
-    names.into_iter().map(Into::into).collect()
 }
 
 /// 按分类与搜索词更新右侧音频列表。

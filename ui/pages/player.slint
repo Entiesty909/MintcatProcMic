@@ -18,6 +18,7 @@ export component PlayerPage inherits Rectangle {
     in-out property <bool> playing: false;
 
     callback category-changed(int);
+    callback category-context(int);
     callback search-changed(string);
     callback entry-double-clicked(int);
     callback add-files();
@@ -50,7 +51,10 @@ export component PlayerPage inherits Rectangle {
                             background: index == root.category-index ? Theme.accentSoft : transparent;
                             border-radius: Theme.radiusControl;
                             Text { text: category; x: 12px; color: index == root.category-index ? Theme.accent : Theme.text; vertical-alignment: TextVerticalAlignment.center; }
-                            TouchArea { clicked => { root.category-changed(index); } }
+                            TouchArea {
+                                clicked => { root.category-changed(index); }
+                                pointer-event(event) => { if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) { root.category-context(index); } }
+                            }
                         }
                     }
                 }
