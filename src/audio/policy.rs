@@ -19,16 +19,24 @@ struct PolicyConfigVtbl {
     set_default_endpoint: unsafe extern "system" fn(*mut c_void, PCWSTR, u32) -> HRESULT,
 }
 
-/// 把指定录音设备设为三种 role 的默认麦。
+/// 把设备设为三种录音 role 的默认麦。
 pub fn set_default_capture(device_id: &str) -> std::result::Result<(), Error> {
     set_default(device_id, &[0, 1, 2])
 }
 
-/// 恢复之前保存的默认麦（role, id）。
+/// 把播放端设为系统默认播放设备（console + multimedia）。
+pub fn set_default_render(device_id: &str) -> std::result::Result<(), Error> {
+    set_default(device_id, &[0, 1])
+}
+
+/// 把播放端设为默认通信设备。
+pub fn set_default_communications(device_id: &str) -> std::result::Result<(), Error> {
+    set_default(device_id, &[2])
+}
+
+/// 恢复之前保存的默认端点（role, id）。
 pub fn restore_defaults(saved: &[(u32, String)]) -> std::result::Result<(), Error> {
-    for (role, id) in saved {
-        set_default(id, &[*role])?;
-    }
+    for (role, id) in saved { set_default(id, &[*role])?; }
     Ok(())
 }
 

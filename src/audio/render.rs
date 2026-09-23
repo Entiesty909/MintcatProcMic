@@ -98,10 +98,10 @@ pub fn open_render_device(device_id: &str) -> Result<RenderClient, Error> {
     }
 }
 
-/// 渲染线程：等事件 → GetBuffer → 混合三条 ring → 乘总线音量 → 写出。
+/// 渲染线程：消费多个进程 ring、麦 ring、SFX ring，再写一个输出设备。
 pub fn run_render_loop(
     session: RenderClient,
-    ring: Arc<SpscRing>,
+    process_rings: Vec<Arc<SpscRing>>,
     mic_ring: Option<Arc<SpscRing>>,
     sfx_ring: Option<Arc<SpscRing>>,
     volume: Arc<AtomicU32>,
@@ -155,16 +155,12 @@ pub fn run_render_loop(
         let vol = f32::from_bits(volume.load(Ordering::Relaxed)).clamp(0.0, 1.0);
         let mic_vol = f32::from_bits(mic_volume.load(Ordering::Relaxed)).clamp(0.0, 1.0);
         let sfx_vol = f32::from_bits(sfx_volume.load(Ordering::Relaxed)).clamp(0.0, 1.0);
-        let needed = tmp.len().max(samples);
-        if tmp.len() < needed {
-            tmp.resize(needed, 0.0);
-        }
-        let n = ring.pop(&mut tmp[..samples]);
-        tmp[n..samples].fill(0.0);
-        if (vol - 1.0).abs() > f32::EPSILON {
-            for s in &mut tmp[..samples] {
-                *s *= vol;
-            }
+        if tmp.len() < samples { tmp.resize(samples, 0.0); }
+        tmp[..samples].fill(0.0);
+        for process_ring in &process_rings {
+            let n = process_ring.pop(&mut mic_tmp[..samples]);
+            mic_tmp[n..samples].fill(0.0);
+            for i in 0..samples { tmp[i] += mic_tmp[i] * vol; }
         }
         if let Some(mic) = &mic_ring {
             if mic_tmp.len() < samples {

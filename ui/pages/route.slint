@@ -39,6 +39,7 @@ component ReadOnlyField inherits Rectangle {
 export component RoutePage inherits Rectangle {
     in-out property <[string]> processes: [];
     in-out property <int> process-index: 0;
+    in-out property <string> selected-processes: "";
     in-out property <string> process-filter: "";
     in-out property <float> volume: 100;
     in-out property <float> mic-volume: 100;
@@ -53,10 +54,11 @@ export component RoutePage inherits Rectangle {
 
     callback refresh();
     callback filter-changed(string);
+    callback process-add();
+    callback process-clear();
     callback volume-edited(float);
     callback mic-volume-edited(float);
     callback open-settings();
-
     background: transparent;
 
     HorizontalLayout {
@@ -104,6 +106,12 @@ export component RoutePage inherits Rectangle {
                     enabled: !root.running;
                     clicked => { root.refresh(); }
                 }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                LineEdit { horizontal-stretch: 1; text <=> root.selected-processes; enabled: false; placeholder-text: "多个进程输入…"; }
+                PmButton { label: "加入"; enabled: !root.running; clicked => { root.process-add(); } }
+                PmButton { label: "清空"; enabled: !root.running; clicked => { root.process-clear(); } }
             }
             LevelMeter { samples: root.capture-wave; tint: Theme.ok; }
             SliderRow {

@@ -26,12 +26,12 @@ pub enum EngineStatus {
     Error(String),
 }
 
-/// 输出线程拥有的固定三条源 ring。
+/// 输出线程拥有的固定多进程 ring。
 struct OutputState {
     /// 请求停止输出线程。
     stop: Arc<AtomicBool>,
-    /// 进程环回源。
-    process_ring: Arc<SpscRing>,
+    /// 每个进程一个独立 SPSC ring。
+    process_rings: Vec<Arc<SpscRing>>,
     /// 物理麦源。
     mic_ring: Arc<SpscRing>,
     /// 音效/文件源。
@@ -44,13 +44,18 @@ struct OutputState {
     render: JoinHandle<()>,
 }
 
+/// 一个进程捕获源。
+struct ProcessThread {
+    slot: usize,
+    stop: Arc<AtomicBool>,
+    thread: JoinHandle<()>,
+}
+
 /// 动态源线程；每条 ring 始终只有一个生产者。
 #[derive(Default)]
 struct SourceThreads {
-    /// 进程源停止令牌。
-    process_stop: Option<Arc<AtomicBool>>,
     /// 进程源线程。
-    process: Option<JoinHandle<()>>,
+    process: Vec<ProcessThread>,
     /// 麦源停止令牌。
     mic_stop: Option<Arc<AtomicBool>>,
     /// 麦源线程。
@@ -143,7 +148,7 @@ impl AudioEngine {
         let render_format = render.format;
         let mix_format = copy_wave(render.mix_format());
         let capacity = ((render_format.sample_rate as usize).saturating_mul(render_format.channels as usize) / 2).max(8192);
-        let process_ring = Arc::new(SpscRing::with_capacity_samples(capacity));
+        let process_rings: Vec<Arc<SpscRing>> = (0..4).map(|_| Arc::new(SpscRing::with_capacity_samples(capacity))).collect();
         let mic_ring = Arc::new(SpscRing::with_capacity_samples(capacity));
         let sfx_ring = Arc::new(SpscRing::with_capacity_samples(capacity));
         let stop = Arc::new(AtomicBool::new(false));
@@ -156,7 +161,7 @@ impl AudioEngine {
         }).map_err(|_| Error::RenderInit("spawn sfx thread"))?;
 
         let stop_r = stop.clone();
-        let process_ring_render = process_ring.clone();
+        let process_rings_render = process_rings.clone();
         let mic_ring_render = mic_ring.clone();
         let sfx_ring_render = sfx_ring.clone();
         let status = self.status.clone();
@@ -169,7 +174,7 @@ impl AudioEngine {
         let render_thread = thread::Builder::new().name("wasapi-render".into()).spawn(move || {
             let _com = com::init_mta();
             run_render_loop(
-                render, process_ring_render, Some(mic_ring_render), Some(sfx_ring_render),
+                render, process_rings_render, Some(mic_ring_render), Some(sfx_ring_render),
                 volume, mic_volume, sfx_volume, master, stop_r, peak, move |err| {
                     tracing::warn!("render stopped: {err}");
                     let mapped = match err { Error::DeviceNotFound => EngineStatus::DeviceGone, other => EngineStatus::Error(other.user_message()) };
@@ -178,9 +183,8 @@ impl AudioEngine {
                 },
             );
         }).map_err(|_| Error::RenderInit("spawn render thread"))?;
-
         if let Ok(mut output) = self.output.lock() {
-            *output = Some(OutputState { stop, process_ring, mic_ring, sfx_ring, render_format, mix_format, render: render_thread });
+            *output = Some(OutputState { stop, process_rings, mic_ring, sfx_ring, render_format, mix_format, render: render_thread });
         }
         if let Ok(mut sources) = self.sources.lock() {
             sources.sfx_tx = Some(sfx_tx);
@@ -192,23 +196,31 @@ impl AudioEngine {
         Ok(())
     }
 
-    /// 挂载或替换进程环回源。要求输出已经打开。
+    /// 替换全部进程源，只保留一个兼容入口。
     pub fn set_process_source(&self, pid: u32) -> Result<(), Error> {
-        let _com = com::init_mta()?;
         self.stop_process_source();
-        let (ring, _, render_format, mix_format) = self.output_routing()?;
+        self.add_process_source(pid, 0)
+    }
+
+    /// 添加一个进程源到固定槽位，最多支持 4 个并行进程。
+    pub fn add_process_source(&self, pid: u32, slot: usize) -> Result<(), Error> {
+        let _com = com::init_mta()?;
+        let (rings, _, render_format, mix_format) = self.output_routing()?;
+        let ring = rings.get(slot).cloned().ok_or(Error::CaptureInit("process source slots full"))?;
         let capture = open_process_capture(pid, Some(&mix_format))?;
         let converter = Converter::new(capture.format, AudioFormat { sample_rate: render_format.sample_rate, channels: render_format.channels, kind: SampleKind::F32 });
         let stop = Arc::new(AtomicBool::new(false));
-        let status = self.status.clone(); let peak = self.capture_peak.clone(); let thread_stop = stop.clone();
-        let thread = thread::Builder::new().name("wasapi-capture".into()).spawn(move || {
+        let status = self.status.clone();
+        let peak = self.capture_peak.clone();
+        let thread_stop = stop.clone();
+        let thread = thread::Builder::new().name(format!("wasapi-capture-{slot}")).spawn(move || {
             let _com = com::init_mta();
             run_capture_loop(capture, ring, converter, thread_stop, peak, |err| {
                 let mapped = match err { Error::ProcessNotFound(_) => EngineStatus::ProcessExited, Error::DeviceNotFound => EngineStatus::DeviceGone, other => EngineStatus::Error(other.user_message()) };
                 if let Ok(mut g) = status.lock() { *g = mapped; }
             });
         }).map_err(|_| Error::CaptureInit("spawn capture thread"))?;
-        if let Ok(mut sources) = self.sources.lock() { sources.process_stop = Some(stop); sources.process = Some(thread); }
+        if let Ok(mut sources) = self.sources.lock() { sources.process.push(ProcessThread { slot, stop, thread }); }
         self.set_status(EngineStatus::Running);
         Ok(())
     }
@@ -249,12 +261,15 @@ impl AudioEngine {
         if matches!(self.status(), EngineStatus::Running) { self.set_status(EngineStatus::Idle); }
     }
 
-    fn output_routing(&self) -> Result<(Arc<SpscRing>, Arc<SpscRing>, AudioFormat, windows::Win32::Media::Audio::WAVEFORMATEX), Error> {
+    fn output_routing(&self) -> Result<(Vec<Arc<SpscRing>>, Arc<SpscRing>, AudioFormat, windows::Win32::Media::Audio::WAVEFORMATEX), Error> {
         let output = self.output.lock().map_err(|_| Error::RenderInit("output lock poisoned"))?;
         let output = output.as_ref().ok_or(Error::RenderInit("output is closed"))?;
-        Ok((output.process_ring.clone(), output.mic_ring.clone(), output.render_format, copy_wave(&output.mix_format)))
+        Ok((output.process_rings.clone(), output.mic_ring.clone(), output.render_format, copy_wave(&output.mix_format)))
     }
-    fn stop_process_source(&self) { let (s,t)=self.sources.lock().ok().map(|mut x|(x.process_stop.take(),x.process.take())).unwrap_or((None,None)); if let Some(s)=s{s.store(true,Ordering::Release)} if let Some(t)=t{let _=t.join();} }
+    fn stop_process_source(&self) {
+        let threads = self.sources.lock().ok().map(|mut x| std::mem::take(&mut x.process)).unwrap_or_default();
+        for source in threads { source.stop.store(true, Ordering::Release); let _ = source.thread.join(); }
+    }
     fn stop_mic_source(&self) { let (s,t)=self.sources.lock().ok().map(|mut x|(x.mic_stop.take(),x.mic.take())).unwrap_or((None,None)); if let Some(s)=s{s.store(true,Ordering::Release)} if let Some(t)=t{let _=t.join();} }
     fn stop_sfx_source(&self) { let (s,t)=self.sources.lock().ok().map(|mut x|(x.sfx_stop.take(),x.sfx.take())).unwrap_or((None,None)); if let Some(s)=s{s.store(true,Ordering::Release)} if let Some(t)=t{let _=t.join();} if let Ok(mut x)=self.sources.lock(){x.sfx_tx=None;} }
     fn set_status(&self, status: EngineStatus) { if let Ok(mut g)=self.status.lock(){*g=status;} }

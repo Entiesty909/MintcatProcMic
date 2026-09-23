@@ -74,8 +74,14 @@ pub struct OutputConfig {
     pub mic_id: Option<String>,
     /// 配对的虚拟麦克风显示名。
     pub mic_name: Option<String>,
-    /// 是否把虚拟麦设成系统默认录音设备。
+    /// 是否把虚拟麦设为系统默认录音设备。
     pub set_default_mic: bool,
+    /// 是否设置为系统默认播放设备。
+    #[serde(default)]
+    pub set_default_render: bool,
+    /// 是否设置为默认通信播放设备。
+    #[serde(default)]
+    pub set_default_communications: bool,
     /// 是否显示物理播放设备。
     pub all_devices: bool,
 }
@@ -84,6 +90,9 @@ pub struct OutputConfig {
 pub struct RouteConfig {
     /// 上次选中的可执行文件名，用名字找新 PID。
     pub process_name: Option<String>,
+    /// 多进程输入名称；为空时使用 process_name。
+    #[serde(default)]
+    pub process_names: Vec<String>,
     /// 进程退出后自动重连开关。
     pub auto_reconnect: bool,
     /// 开始转发时是否混入设置页选择的物理麦。
@@ -210,6 +219,9 @@ pub struct AppConfig {
     pub pads: Vec<PadConfig>,
     /// 播放器。
     pub player: PlayerConfig,
+    /// 自定义音频分类树节点。
+    #[serde(default)]
+    pub audio_categories: Vec<String>,
     /// 音频库条目。
     #[serde(default)]
     pub audio_entries: Vec<AudioEntry>,
@@ -228,6 +240,7 @@ impl Default for AppConfig {
             hotkeys: Hotkeys::default(),
             pads: Vec::new(),
             player: PlayerConfig::default(),
+            audio_categories: Vec::new(),
             audio_entries: Vec::new(),
             playback_key: None,
         }

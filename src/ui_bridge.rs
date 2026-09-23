@@ -45,11 +45,16 @@ struct UiCache {
     filter: String,
     /// 输出列表是否包含物理播放设备。
     all_devices: bool,
-    /// 是否把虚拟麦设成系统默认麦克风。
+    /// 当前已加入混音的进程 PID。
+    selected_pids: Vec<u32>,
+    /// 是否设置系统默认麦。
     set_default_mic: bool,
+    /// 是否设置系统默认播放。
+    set_default_render: bool,
+    /// 是否设置默认通信播放。
+    set_default_communications: bool,
     /// 音频库条目。
     audio_entries: Vec<config::AudioEntry>,
-    /// 当前分类。
     audio_category: String,
     /// 搜索关键字。
     audio_search: String,
@@ -60,12 +65,15 @@ pub fn run_ui() -> Result<(), Error> {
         return Ok(());
     };
     let ui = MainWindow::new().map_err(|e| Error::InvalidArgs(e.to_string()))?;
+    let engine = Rc::new(AudioEngine::new());
     let app_config = Rc::new(RefCell::new(config::load()));
     let persisted = app_config.borrow().clone();
-    let engine = Rc::new(AudioEngine::new());
     let cache = Rc::new(RefCell::new(UiCache {
         all_devices: persisted.output.all_devices,
+        selected_pids: Vec::new(),
         set_default_mic: persisted.output.set_default_mic,
+        set_default_render: persisted.output.set_default_render,
+        set_default_communications: persisted.output.set_default_communications,
         audio_entries: persisted.audio_entries.clone(),
         audio_category: "全部".into(),
         ..UiCache::default()
@@ -89,6 +97,8 @@ pub fn run_ui() -> Result<(), Error> {
     ui.set_mic_volume((persisted.mix.mic * 100.0).clamp(0.0, 100.0));
     ui.set_master_volume((persisted.mix.master * 100.0).clamp(0.0, 100.0));
     ui.set_mix_mic(persisted.route.mix_mic);
+    ui.set_set_default_render(persisted.output.set_default_render);
+    ui.set_set_default_communications(persisted.output.set_default_communications);
     ui.window()
         .show()
         .map_err(|e| Error::InvalidArgs(e.to_string()))?;
@@ -243,6 +253,14 @@ fn wire_callbacks(
         });
     }
     {
+        let app_config = app_config.clone(); let cache = cache.clone();
+        ui.on_set_default_render_toggled(move |on| { cache.borrow_mut().set_default_render = on; app_config.borrow_mut().output.set_default_render = on; });
+    }
+    {
+        let app_config = app_config.clone(); let cache = cache.clone();
+        ui.on_set_default_communications_toggled(move |on| { cache.borrow_mut().set_default_communications = on; app_config.borrow_mut().output.set_default_communications = on; });
+    }
+    {
         let ui_weak = ui.as_weak();
         ui.on_install_cable(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
@@ -317,11 +335,26 @@ fn wire_callbacks(
             let mut config = app_config.borrow_mut();
             config.hotkeys.toggle_route = hk;
             config::save(&config);
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_listening_hotkey(false);
-                ui.set_hotkey_label(hk.label().into());
+            if let Some(ui) = ui_weak.upgrade() { ui.set_listening_hotkey(false); ui.set_hotkey_label(hk.label().into()); }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let cache = cache.clone();
+        ui.on_process_add(move || {
+            let index = ui_weak.upgrade().map(|ui| ui.get_process_index()).unwrap_or(0) as usize;
+            let mut c = cache.borrow_mut();
+            if let Some(pid) = c.pids.get(index).copied().filter(|pid| *pid != 0) {
+                if !c.selected_pids.contains(&pid) { c.selected_pids.push(pid); }
+                let labels: Vec<String> = c.selected_pids.iter().filter_map(|pid| c.processes.iter().find(|p| p.pid == *pid).map(|p| format!("{} [{}]", p.name, p.pid))).collect();
+                if let Some(ui) = ui_weak.upgrade() { ui.set_selected_processes(labels.join("、").into()); }
             }
         });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let cache = cache.clone();
+        ui.on_process_clear(move || { cache.borrow_mut().selected_pids.clear(); if let Some(ui) = ui_weak.upgrade() { ui.set_selected_processes("".into()); } });
     }
     {
         let app_config = app_config.clone();
@@ -414,20 +447,27 @@ fn wire_callbacks(
             if engine.is_running() {
                 engine.stop(); restore_default_mics(&saved_mics); ui.set_running(false); ui.set_status_text("未运行".into()); ui.set_status_kind(0); ui.set_error_text("".into()); return;
             }
-            let (pid, dest, mic_id, set_default, process_name, mix_mic) = {
+            let (pid, extra_pids, dest, mic_id, set_default, process_name, process_names, mix_mic) = {
                 let c = cache.borrow();
                 let pid = c.pids.get(ui.get_process_index() as usize).copied().filter(|p| *p != 0);
+                let mut selected = c.selected_pids.clone();
+                if selected.is_empty() { if let Some(pid) = pid { selected.push(pid); } }
+                let primary = selected.first().copied().or(pid);
+                let extra = selected.iter().skip(1).copied().collect::<Vec<_>>();
                 let dest = c.dests.get(ui.get_device_index() as usize).cloned();
                 let mic_index = ui.get_mic_index() as usize;
                 let mic_id = if ui.get_mix_mic() { c.mic_ids.get(mic_index).filter(|s| !s.is_empty()).cloned() } else { None };
-                let process_name = pid.and_then(|pid| c.processes.iter().find(|p| p.pid == pid).map(|p| p.name.clone()));
-                (pid, dest, mic_id, c.set_default_mic, process_name, ui.get_mix_mic())
+                let names = selected.iter().filter_map(|pid| c.processes.iter().find(|p| p.pid == *pid).map(|p| p.name.clone())).collect::<Vec<_>>();
+                (primary, extra, dest, mic_id, c.set_default_mic, names.first().cloned(), names, ui.get_mix_mic())
             };
             let (Some(pid), Some(dest)) = (pid, dest) else { ui.set_error_text("请选择进程和输出设备".into()); return; };
             engine.set_volume(ui.get_volume() / 100.0); engine.set_mic_volume(ui.get_mic_volume() / 100.0); engine.set_master_volume(ui.get_master_volume() / 100.0);
-            match engine.start(pid, &dest.render_id, mic_id.as_deref()) {
-                Ok(()) => { let mut config = app_config.borrow_mut(); config.route.process_name = process_name; config.route.mix_mic = mix_mic; config.output.device_id = Some(dest.render_id.clone()); config.output.device_name = Some(dest.label.clone()); config.output.mic_id = dest.capture_id.clone(); config.output.mic_name = dest.capture_name.clone(); config.output.set_default_mic = set_default; config::save(&config); ui.set_running(true); ui.set_status_text("运行中".into()); ui.set_status_kind(1); ui.set_error_text("".into()); apply_virtual_mic_route(&ui, &dest, set_default, &saved_mics); }
-                Err(e) => { tracing::warn!("start failed: {e}"); ui.set_running(false); ui.set_status_text("错误".into()); ui.set_status_kind(3); ui.set_error_text(e.user_message().into()); }
+            let start_result = engine.open_output(&dest.render_id)
+                .and_then(|_| engine.set_process_source(pid))
+                .and_then(|_| { for (slot, extra_pid) in extra_pids.iter().enumerate() { engine.add_process_source(*extra_pid, slot + 1)?; } engine.set_mic_source(mic_id.as_deref()) });
+            match start_result {
+                Ok(()) => { let c = cache.borrow(); if c.set_default_render { let _ = policy::set_default_render(&dest.render_id); } if c.set_default_communications { let _ = policy::set_default_communications(&dest.render_id); } drop(c); let mut config = app_config.borrow_mut(); config.route.process_name = process_name; config.route.process_names = process_names; config.route.mix_mic = mix_mic; config.output.device_id = Some(dest.render_id.clone()); config.output.device_name = Some(dest.label.clone()); config.output.mic_id = dest.capture_id.clone(); config.output.mic_name = dest.capture_name.clone(); config.output.set_default_mic = set_default; config::save(&config); ui.set_running(true); ui.set_status_text("运行中".into()); ui.set_status_kind(1); ui.set_error_text("".into()); apply_virtual_mic_route(&ui, &dest, set_default, &saved_mics); }
+                Err(e) => { engine.stop(); tracing::warn!("start failed: {e}"); ui.set_running(false); ui.set_status_text("错误".into()); ui.set_status_kind(3); ui.set_error_text(e.user_message().into()); }
             }
         });
     }
@@ -731,6 +771,8 @@ fn persist_config(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>, app_config: &Rc
     saved.audio_entries = c.audio_entries.clone();
     saved.output.all_devices = c.all_devices;
     saved.output.set_default_mic = c.set_default_mic;
+    saved.output.set_default_render = c.set_default_render;
+    saved.output.set_default_communications = c.set_default_communications;
     saved.route.mix_mic = ui.get_mix_mic();
     saved.output.device_name = c.dests.get(ui.get_device_index() as usize).map(|d| d.label.clone());
     let mic_index = ui.get_mic_index() as usize;

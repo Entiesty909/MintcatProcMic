@@ -12,6 +12,8 @@ export component SettingsPage inherits Rectangle {
     in-out property <bool> all-devices: false;
     in-out property <bool> show-set-default-mic: false;
     in-out property <bool> set-default-mic: false;
+    in-out property <bool> set-default-render: false;
+    in-out property <bool> set-default-communications: false;
     in-out property <string> dest-hint: "";
     in-out property <[string]> mics: [];
     in-out property <int> mic-index: 0;
@@ -31,6 +33,8 @@ export component SettingsPage inherits Rectangle {
     callback reset-hotkey();
     callback all-devices-toggled(bool);
     callback set-default-mic-toggled(bool);
+    callback set-default-render-toggled(bool);
+    callback set-default-communications-toggled(bool);
     callback playback-key-mode-toggled(int);
 
     background: transparent;
@@ -87,11 +91,13 @@ export component SettingsPage inherits Rectangle {
                     toggled => { root.all-devices-toggled(self.checked); }
                 }
                 if root.show-set-default-mic: CheckBox {
-                    text: "设为系统默认麦克风（停止转发后还原）";
+                    text: "设为默认麦克风（停止转发后还原）";
                     checked <=> root.set-default-mic;
                     enabled: !root.running;
                     toggled => { root.set-default-mic-toggled(self.checked); }
                 }
+                CheckBox { text: "设为系统默认播放设备"; checked <=> root.set-default-render; enabled: !root.running; toggled => { root.set-default-render-toggled(self.checked); } }
+                CheckBox { text: "设为默认通信播放设备"; checked <=> root.set-default-communications; enabled: !root.running; toggled => { root.set-default-communications-toggled(self.checked); } }
                 Text {
                     text: root.dest-hint;
                     color: Theme.text2;

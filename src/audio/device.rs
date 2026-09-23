@@ -88,13 +88,19 @@ pub fn list_destinations(include_all: bool) -> Result<Vec<DestDevice>, Error> {
 pub fn default_capture_ids() -> Vec<(u32, String)> {
     let mut out = Vec::new();
     for (role_n, role) in [(0u32, eConsole), (1, eMultimedia), (2, eCommunications)] {
-        if let Ok(id) = default_endpoint_id(eCapture, role) {
-            out.push((role_n, id));
-        }
+        if let Ok(id) = default_endpoint_id(eCapture, role) { out.push((role_n, id)); }
     }
     out
 }
 
+/// 当前默认播放设备 ID（三种 role）。
+pub fn default_render_ids() -> Vec<(u32, String)> {
+    let mut out = Vec::new();
+    for (role_n, role) in [(0u32, eConsole), (1, eMultimedia), (2, eCommunications)] {
+        if let Ok(id) = default_endpoint_id(eRender, role) { out.push((role_n, id)); }
+    }
+    out
+}
 #[derive(Clone, Debug)]
 struct Endpoint {
     id: String,
