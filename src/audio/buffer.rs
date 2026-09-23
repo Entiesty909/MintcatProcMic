@@ -45,6 +45,11 @@ impl SpscRing {
         let r = self.read.load(Ordering::Acquire);
         w.wrapping_sub(r)
     }
+    /// 丢弃当前积压样本，切换独立播放源时使用。
+    pub fn clear(&self) {
+        let write = self.write.load(Ordering::Acquire);
+        self.read.store(write, Ordering::Release);
+    }
 
     /// 写入最新采样。空间不足时先丢最旧，保证实时路径不阻塞。
     pub fn push_latest(&self, src: &[f32]) {

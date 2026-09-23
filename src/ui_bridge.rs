@@ -3,13 +3,16 @@
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use slint::{ModelRc, Timer, TimerMode, VecModel};
 use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OPENFILENAMEW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST};
+use windows::Win32::UI::Controls::Dialogs::{
+    GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+};
 use windows::core::{PCWSTR, PWSTR};
 
 use crate::audio::device::{self, DestDevice};
@@ -55,6 +58,7 @@ struct UiCache {
     set_default_render: bool,
     /// 是否设置默认通信播放。
     set_default_communications: bool,
+    /// 是否设置默认通信播放。
     audio_categories: Vec<String>,
     /// 音频库条目。
     audio_entries: Vec<config::AudioEntry>,
@@ -64,6 +68,8 @@ struct UiCache {
     last_audio_click: Option<(usize, Instant)>,
     /// 搜索关键字。
     audio_search: String,
+    /// 当前解码任务；切换音频时取消旧任务。
+    audio_cancel: Option<Arc<AtomicBool>>,
 }
 /// 创建窗口、填列表、跑事件循环。退出时还原默认麦并停引擎。
 pub fn run_ui() -> Result<(), Error> {
@@ -88,8 +94,16 @@ pub fn run_ui() -> Result<(), Error> {
     let capture_hist = Rc::new(RefCell::new(vec![0.0f32; WAVE_BARS]));
     let mic_hist = Rc::new(RefCell::new(vec![0.0f32; WAVE_BARS]));
     let render_hist = Rc::new(RefCell::new(vec![0.0f32; WAVE_BARS]));
-    let preview = Arc::new(Mutex::new(if persisted.preview_enabled { crate::audio::preview::PreviewEngine::open_default().ok() } else { None }));
-    if let Ok(guard) = preview.lock() { if let Some(p) = guard.as_ref() { p.set_volume(persisted.preview_volume); } }
+    let preview = Arc::new(Mutex::new(if persisted.preview_enabled {
+        crate::audio::preview::PreviewEngine::open_default().ok()
+    } else {
+        None
+    }));
+    if let Ok(guard) = preview.lock() {
+        if let Some(p) = guard.as_ref() {
+            p.set_volume(persisted.preview_volume);
+        }
+    }
     let hotkey = Rc::new(RefCell::new(persisted.hotkeys.toggle_route));
     if let Some(action) = persisted.playback_key {
         ui.set_playback_key_label(action.key.label().into());
@@ -142,8 +156,7 @@ pub fn run_ui() -> Result<(), Error> {
     );
     let _hotkey_server = hotkey_server;
 
-    ui.run()
-        .map_err(|e| Error::InvalidArgs(e.to_string()))?;
+    ui.run().map_err(|e| Error::InvalidArgs(e.to_string()))?;
     persist_config(&ui, &cache, &app_config);
     restore_default_mics(&saved_mics);
     engine.stop();
@@ -154,16 +167,13 @@ pub fn run_ui() -> Result<(), Error> {
 /// 高 DPI 小屏如果直接使用默认尺寸，底部状态栏会落到屏幕外。
 fn fit_window_to_screen(ui: &MainWindow) {
     let scale = ui.window().scale_factor().max(1.0);
-    let (work_w, work_h) = primary_work_area().unwrap_or((
-        (WINDOW_W * scale) as u32,
-        (WINDOW_H * scale) as u32,
-    ));
+    let (work_w, work_h) =
+        primary_work_area().unwrap_or(((WINDOW_W * scale) as u32, (WINDOW_H * scale) as u32));
     let available_w = work_w as f32 / scale;
     let available_h = work_h as f32 / scale;
     let width = WINDOW_W.min(available_w - 12.0).max(900.0);
     let height = WINDOW_H.min(available_h - 24.0).max(520.0);
-    ui.window()
-        .set_size(slint::LogicalSize::new(width, height));
+    ui.window().set_size(slint::LogicalSize::new(width, height));
 }
 
 /// 主显示器工作区（物理像素）。取不到就返回 None。
@@ -254,20 +264,40 @@ fn wire_callbacks(
     }
     {
         let cache = cache.clone();
-        ui.on_device_toggled(move |index, checked| { if let Some(slot) = cache.borrow_mut().device_selected.get_mut(index as usize) { *slot = checked; } });
+        ui.on_device_toggled(move |index, checked| {
+            if let Some(slot) = cache.borrow_mut().device_selected.get_mut(index as usize) {
+                *slot = checked;
+            }
+        });
     }
     {
-        let preview = preview.clone(); let app_config = app_config.clone();
+        let preview = preview.clone();
+        let app_config = app_config.clone();
         ui.on_preview_enabled_toggled(move |enabled| {
             app_config.borrow_mut().preview_enabled = enabled;
-            if enabled && preview.lock().ok().is_some_and(|p| p.is_none()) { *preview.lock().unwrap() = crate::audio::preview::PreviewEngine::open_default().ok(); }
-            if !enabled { preview.lock().ok().and_then(|mut p| p.take()); }
+            if enabled && preview.lock().ok().is_some_and(|p| p.is_none()) {
+                *preview.lock().unwrap() =
+                    crate::audio::preview::PreviewEngine::open_default().ok();
+            }
+            if !enabled {
+                preview.lock().ok().and_then(|mut p| p.take());
+            }
             config::save(&app_config.borrow());
         });
     }
     {
-        let preview = preview.clone(); let app_config = app_config.clone();
-        ui.on_preview_volume_edited(move |v| { let value = (v / 100.0).clamp(0.0, 1.0); if let Ok(guard) = preview.lock() { if let Some(engine) = guard.as_ref() { engine.set_volume(value); } } app_config.borrow_mut().preview_volume = value; config::save(&app_config.borrow()); });
+        let preview = preview.clone();
+        let app_config = app_config.clone();
+        ui.on_preview_volume_edited(move |v| {
+            let value = (v / 100.0).clamp(0.0, 1.0);
+            if let Ok(guard) = preview.lock() {
+                if let Some(engine) = guard.as_ref() {
+                    engine.set_volume(value);
+                }
+            }
+            app_config.borrow_mut().preview_volume = value;
+            config::save(&app_config.borrow());
+        });
     }
     {
         let cache = cache.clone();
@@ -278,12 +308,20 @@ fn wire_callbacks(
         });
     }
     {
-        let app_config = app_config.clone(); let cache = cache.clone();
-        ui.on_set_default_render_toggled(move |on| { cache.borrow_mut().set_default_render = on; app_config.borrow_mut().output.set_default_render = on; });
+        let app_config = app_config.clone();
+        let cache = cache.clone();
+        ui.on_set_default_render_toggled(move |on| {
+            cache.borrow_mut().set_default_render = on;
+            app_config.borrow_mut().output.set_default_render = on;
+        });
     }
     {
-        let app_config = app_config.clone(); let cache = cache.clone();
-        ui.on_set_default_communications_toggled(move |on| { cache.borrow_mut().set_default_communications = on; app_config.borrow_mut().output.set_default_communications = on; });
+        let app_config = app_config.clone();
+        let cache = cache.clone();
+        ui.on_set_default_communications_toggled(move |on| {
+            cache.borrow_mut().set_default_communications = on;
+            app_config.borrow_mut().output.set_default_communications = on;
+        });
     }
     {
         let ui_weak = ui.as_weak();
@@ -336,9 +374,15 @@ fn wire_callbacks(
                 return;
             };
             let mut mods = 0u32;
-            if alt { mods |= 1; }
-            if ctrl { mods |= 2; }
-            if shift { mods |= 4; }
+            if alt {
+                mods |= 1;
+            }
+            if ctrl {
+                mods |= 2;
+            }
+            if shift {
+                mods |= 4;
+            }
             let hk = config::Hotkey { mods, vk };
             *hotkey.borrow_mut() = hk;
             server.set(hk);
@@ -360,26 +404,50 @@ fn wire_callbacks(
             let mut config = app_config.borrow_mut();
             config.hotkeys.toggle_route = hk;
             config::save(&config);
-            if let Some(ui) = ui_weak.upgrade() { ui.set_listening_hotkey(false); ui.set_hotkey_label(hk.label().into()); }
-        });
-    }
-    {
-        let ui_weak = ui.as_weak();
-        let cache = cache.clone();
-        ui.on_process_add(move || {
-            let index = ui_weak.upgrade().map(|ui| ui.get_process_index()).unwrap_or(0) as usize;
-            let mut c = cache.borrow_mut();
-            if let Some(pid) = c.pids.get(index).copied().filter(|pid| *pid != 0) {
-                if !c.selected_pids.contains(&pid) { c.selected_pids.push(pid); }
-                let labels: Vec<String> = c.selected_pids.iter().filter_map(|pid| c.processes.iter().find(|p| p.pid == *pid).map(|p| format!("{} [{}]", p.name, p.pid))).collect();
-                if let Some(ui) = ui_weak.upgrade() { ui.set_selected_processes(labels.join("、").into()); }
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_listening_hotkey(false);
+                ui.set_hotkey_label(hk.label().into());
             }
         });
     }
     {
         let ui_weak = ui.as_weak();
         let cache = cache.clone();
-        ui.on_process_clear(move || { cache.borrow_mut().selected_pids.clear(); if let Some(ui) = ui_weak.upgrade() { ui.set_selected_processes("".into()); } });
+        ui.on_process_add(move || {
+            let index = ui_weak
+                .upgrade()
+                .map(|ui| ui.get_process_index())
+                .unwrap_or(0) as usize;
+            let mut c = cache.borrow_mut();
+            if let Some(pid) = c.pids.get(index).copied().filter(|pid| *pid != 0) {
+                if !c.selected_pids.contains(&pid) {
+                    c.selected_pids.push(pid);
+                }
+                let labels: Vec<String> = c
+                    .selected_pids
+                    .iter()
+                    .filter_map(|pid| {
+                        c.processes
+                            .iter()
+                            .find(|p| p.pid == *pid)
+                            .map(|p| format!("{} [{}]", p.name, p.pid))
+                    })
+                    .collect();
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_selected_processes(labels.join("、").into());
+                }
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let cache = cache.clone();
+        ui.on_process_clear(move || {
+            cache.borrow_mut().selected_pids.clear();
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_selected_processes("".into());
+            }
+        });
     }
     {
         let app_config = app_config.clone();
@@ -394,8 +462,15 @@ fn wire_callbacks(
         ui.on_playback_key_mode_toggled(move |mode| {
             let mut config = app_config.borrow_mut();
             let current_key = config.playback_key.map(|a| a.key).unwrap_or_default();
-            let mode = match mode { 1 => config::PlaybackKeyMode::Press, 2 => config::PlaybackKeyMode::Hold, _ => config::PlaybackKeyMode::None };
-            config.playback_key = Some(config::PlaybackKeyAction { mode, key: current_key });
+            let mode = match mode {
+                1 => config::PlaybackKeyMode::Press,
+                2 => config::PlaybackKeyMode::Hold,
+                _ => config::PlaybackKeyMode::None,
+            };
+            config.playback_key = Some(config::PlaybackKeyAction {
+                mode,
+                key: current_key,
+            });
             config::save(&config);
         });
     }
@@ -404,14 +479,34 @@ fn wire_callbacks(
         let cache = cache.clone();
         let app_config = app_config.clone();
         ui.on_add_audio_files(move || {
-            let Some(path) = select_audio_file() else { return; };
-            let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("音频").to_string();
-            let entry = config::AudioEntry { name, path: path.to_string_lossy().into_owned(), category: "未分类".into(), loop_playback: false };
+            let Some(path) = select_audio_file() else {
+                return;
+            };
+            if let Err(error) = crate::audio::decode::validate_file(&path) {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_error_text(error.user_message().into());
+                }
+                return;
+            }
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("音频")
+                .to_string();
+            let entry = config::AudioEntry {
+                name,
+                path: path.to_string_lossy().into_owned(),
+                category: "未分类".into(),
+                loop_playback: false,
+            };
             cache.borrow_mut().audio_entries.push(entry);
             let entries = cache.borrow().audio_entries.clone();
             app_config.borrow_mut().audio_entries = entries;
             config::save(&app_config.borrow());
-            if let Some(ui) = ui_weak.upgrade() { update_audio_list(&ui, &cache); }
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_error_text("".into());
+                update_audio_list(&ui, &cache);
+            }
         });
     }
     {
@@ -419,40 +514,142 @@ fn wire_callbacks(
         let cache = cache.clone();
         ui.on_audio_category_changed(move |index| {
             let categories = audio_categories(&cache);
-            if let Some(category) = categories.get(index as usize) { cache.borrow_mut().audio_category = category.to_string(); }
-            if let Some(ui) = ui_weak.upgrade() { update_audio_list(&ui, &cache); }
+            if let Some(category) = categories.get(index as usize) {
+                cache.borrow_mut().audio_category = category.to_string();
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                update_audio_list(&ui, &cache);
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let cache = cache.clone();
+        ui.on_audio_category_context(move |index| {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_audio_category_index(index);
+                ui.set_audio_category_menu_open(true);
+            }
+            let categories = audio_categories(&cache);
+            if let Some(category) = categories.get(index as usize) {
+                cache.borrow_mut().audio_category = category.to_string();
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                update_audio_list(&ui, &cache);
+            }
         });
     }
     {
         let ui_weak = ui.as_weak();
         let cache = cache.clone();
         let app_config = app_config.clone();
-        ui.on_audio_category_context(move |_| {
-            let mut c = cache.borrow_mut();
-            let name = format!("新分类 {}", c.audio_categories.len() + 1);
-            if !c.audio_categories.contains(&name) { c.audio_categories.push(name.clone()); }
-            app_config.borrow_mut().audio_categories = c.audio_categories.clone();
-            config::save(&app_config.borrow());
-            if let Some(ui) = ui_weak.upgrade() { ui.set_audio_categories(ModelRc::new(VecModel::from(audio_categories(&cache)))); }
+        ui.on_audio_category_new(move || {
+            let categories = {
+                let mut c = cache.borrow_mut();
+                let name = format!("新分类 {}", c.audio_categories.len() + 1);
+                if !c.audio_categories.contains(&name) {
+                    c.audio_categories.push(name);
+                }
+                c.audio_categories.clone()
+            };
+            {
+                let mut cfg = app_config.borrow_mut();
+                cfg.audio_categories = categories;
+                config::save(&cfg);
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_audio_categories(ModelRc::new(VecModel::from(audio_categories(&cache))));
+            }
         });
     }
     {
-        let ui_weak = ui.as_weak(); let cache = cache.clone();
-        ui.on_audio_search_changed(move |text| { cache.borrow_mut().audio_search = text.to_string(); if let Some(ui) = ui_weak.upgrade() { update_audio_list(&ui, &cache); } });
-    }
-    {
-        let ui_weak = ui.as_weak(); let cache = cache.clone(); let app_config = app_config.clone();
+        let ui_weak = ui.as_weak();
+        let cache = cache.clone();
+        let app_config = app_config.clone();
         ui.on_category_rename(move || {
-            let Some(ui) = ui_weak.upgrade() else { return; };
-            let index = ui.get_audio_category_index() as usize; let name = ui.get_audio_category_edit_name().trim().to_string(); if index < 2 || name.is_empty() { return; }
-            if let Some(old) = audio_categories(&cache).get(index).map(|s| s.to_string()) { let mut c = cache.borrow_mut(); for cat in &mut c.audio_categories { if *cat == old { *cat = name.clone(); } } for entry in &mut c.audio_entries { if entry.category == old { entry.category = name.clone(); } } let mut cfg = app_config.borrow_mut(); cfg.audio_categories = c.audio_categories.clone(); cfg.audio_entries = c.audio_entries.clone(); config::save(&cfg); ui.set_audio_categories(ModelRc::new(VecModel::from(audio_categories(&cache)))); update_audio_list(&ui, &cache); }
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let index = ui.get_audio_category_index() as usize;
+            let name = ui.get_audio_category_edit_name().trim().to_string();
+            if index < 2 || name.is_empty() {
+                return;
+            }
+            let old = audio_categories(&cache).get(index).map(|s| s.to_string());
+            let Some(old) = old else {
+                return;
+            };
+            let (categories, entries) = {
+                let mut c = cache.borrow_mut();
+                for cat in &mut c.audio_categories {
+                    if *cat == old {
+                        *cat = name.clone();
+                    }
+                }
+                for entry in &mut c.audio_entries {
+                    if entry.category == old {
+                        entry.category = name.clone();
+                    }
+                }
+                (c.audio_categories.clone(), c.audio_entries.clone())
+            };
+            {
+                let mut cfg = app_config.borrow_mut();
+                cfg.audio_categories = categories;
+                cfg.audio_entries = entries;
+                config::save(&cfg);
+            }
+            ui.set_audio_categories(ModelRc::new(VecModel::from(audio_categories(&cache))));
+            update_audio_list(&ui, &cache);
         });
     }
     {
-        let ui_weak = ui.as_weak(); let cache = cache.clone(); let app_config = app_config.clone();
+        let ui_weak = ui.as_weak();
+        let cache = cache.clone();
+        let app_config = app_config.clone();
         ui.on_category_delete(move || {
-            let Some(ui) = ui_weak.upgrade() else { return; }; let index = ui.get_audio_category_index() as usize; if index < 2 { return; }
-            if let Some(name) = audio_categories(&cache).get(index).map(|s| s.to_string()) { let mut c = cache.borrow_mut(); c.audio_categories.retain(|v| v != &name); for entry in &mut c.audio_entries { if entry.category == name { entry.category = "未分类".into(); } } let mut cfg = app_config.borrow_mut(); cfg.audio_categories = c.audio_categories.clone(); cfg.audio_entries = c.audio_entries.clone(); config::save(&cfg); ui.set_audio_category_index(0); ui.set_audio_category_edit_name("".into()); ui.set_audio_categories(ModelRc::new(VecModel::from(audio_categories(&cache)))); update_audio_list(&ui, &cache); }
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let index = ui.get_audio_category_index() as usize;
+            if index < 2 {
+                return;
+            }
+            let name = audio_categories(&cache).get(index).map(|s| s.to_string());
+            let Some(name) = name else {
+                return;
+            };
+            let (categories, entries) = {
+                let mut c = cache.borrow_mut();
+                c.audio_categories.retain(|v| v != &name);
+                for entry in &mut c.audio_entries {
+                    if entry.category == name {
+                        entry.category = "未分类".into();
+                    }
+                }
+                (c.audio_categories.clone(), c.audio_entries.clone())
+            };
+            {
+                let mut cfg = app_config.borrow_mut();
+                cfg.audio_categories = categories;
+                cfg.audio_entries = entries;
+                config::save(&cfg);
+            }
+            ui.set_audio_category_index(0);
+            ui.set_audio_category_edit_name("".into());
+            ui.set_audio_category_menu_open(false);
+            ui.set_audio_categories(ModelRc::new(VecModel::from(audio_categories(&cache))));
+            update_audio_list(&ui, &cache);
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let cache = cache.clone();
+        ui.on_audio_search_changed(move |text| {
+            cache.borrow_mut().audio_search = text.to_string();
+            if let Some(ui) = ui_weak.upgrade() {
+                update_audio_list(&ui, &cache);
+            }
         });
     }
     {
@@ -460,36 +657,156 @@ fn wire_callbacks(
         let engine = engine.clone();
         let cache = cache.clone();
         let preview = preview.clone();
+        let app_config = app_config.clone();
         ui.on_audio_entry_double_clicked(move |index| {
             let now = Instant::now();
-            let should_play = { let mut c = cache.borrow_mut(); let double = c.last_audio_click.is_some_and(|(last, time)| last == index as usize && now.duration_since(time) < Duration::from_millis(450)); c.last_audio_click = Some((index as usize, now)); double };
-            let Some(ui) = ui_weak.upgrade() else { return; };
+            let should_play = {
+                let mut c = cache.borrow_mut();
+                let double = c.last_audio_click.is_some_and(|(last, time)| {
+                    last == index as usize && now.duration_since(time) < Duration::from_millis(450)
+                });
+                c.last_audio_click = Some((index as usize, now));
+                double
+            };
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
             ui.set_audio_entry_index(index);
-            if !should_play { return; }
-            let entry = { let c = cache.borrow(); let category = c.audio_category.clone(); let search = c.audio_search.to_ascii_lowercase(); c.audio_entries.iter().filter(|e| (category == "全部" || e.category == category) && (search.is_empty() || e.name.to_ascii_lowercase().contains(&search))).nth(index as usize).cloned() };
-            let Some(entry) = entry else { return; };
-            if ui.get_player_playing() && ui.get_audio_current_name() == entry.name { if let Ok(sender) = engine.sfx_sender() { let _ = sender.send(crate::audio::sfx::SfxCommand::StopAll); } ui.set_player_playing(false); return; }
-            let sender = engine.sfx_sender().ok(); let preview = preview.clone(); let looped = entry.loop_playback; let ui_for_worker = ui_weak.clone();
+            if !should_play {
+                return;
+            }
+            let entry = {
+                let c = cache.borrow();
+                let category = c.audio_category.clone();
+                let search = c.audio_search.to_ascii_lowercase();
+                c.audio_entries
+                    .iter()
+                    .filter(|e| {
+                        (category == "全部" || e.category == category)
+                            && (search.is_empty() || e.name.to_ascii_lowercase().contains(&search))
+                    })
+                    .nth(index as usize)
+                    .cloned()
+            };
+            let Some(entry) = entry else {
+                return;
+            };
+            if ui.get_player_playing() && ui.get_audio_current_name() == entry.name {
+                if let Some(cancel) = cache.borrow_mut().audio_cancel.take() {
+                    cancel.store(true, Ordering::Release);
+                }
+                if let Ok(sender) = engine.sfx_sender() {
+                    let _ = sender.send(crate::audio::sfx::SfxCommand::StopAll);
+                }
+                if let Ok(guard) = preview.lock() {
+                    if let Some(p) = guard.as_ref() {
+                        p.stop_source();
+                    }
+                }
+                ui.set_player_playing(false);
+                return;
+            }
+            if let Some(sender) = engine.sfx_sender().ok() {
+                let _ = sender.send(crate::audio::sfx::SfxCommand::StopAll);
+            }
+            if let Ok(guard) = preview.lock() {
+                if let Some(p) = guard.as_ref() {
+                    p.stop_source();
+                }
+            }
+            ui.set_player_playing(false);
+            if let Some(old) = cache
+                .borrow_mut()
+                .audio_cancel
+                .replace(Arc::new(AtomicBool::new(false)))
+            {
+                old.store(true, Ordering::Release);
+            }
+            let cancel = cache
+                .borrow()
+                .audio_cancel
+                .clone()
+                .unwrap_or_else(|| Arc::new(AtomicBool::new(true)));
+            let preview_volume = app_config.borrow().preview_volume;
+            let sender = engine.sfx_sender().ok();
+            let preview = preview.clone();
+            let looped = entry.loop_playback;
+            let ui_for_worker = ui_weak.clone();
             thread::spawn(move || {
-                match crate::audio::decode::open(std::path::Path::new(&entry.path)).and_then(|reader| reader.read_all()) {
-                    Ok(data) => { let data = Arc::new(data); if let Some(sender) = sender { let _ = sender.send(crate::audio::sfx::SfxCommand::Play { data: data.clone(), mode: if looped { crate::audio::sfx::SfxMode::Loop } else { crate::audio::sfx::SfxMode::Once }, volume: 1.0 }); } if let Ok(guard) = preview.lock() { if let Some(p) = guard.as_ref() { p.play(data, looped); } } let _ = slint::invoke_from_event_loop(move || { if let Some(ui) = ui_for_worker.upgrade() { ui.set_audio_current_name(entry.name.into()); ui.set_player_playing(true); } }); }
-                    Err(error) => { let _ = slint::invoke_from_event_loop(move || { if let Some(ui) = ui_for_worker.upgrade() { ui.set_error_text(error.user_message().into()); } }); }
+                match crate::audio::decode::open(std::path::Path::new(&entry.path))
+                    .and_then(|reader| reader.read_all_cancellable(&cancel))
+                {
+                    Ok(Some(data)) => {
+                        let data = Arc::new(data);
+                        if let Some(sender) = sender {
+                            let _ = sender.send(crate::audio::sfx::SfxCommand::Play {
+                                data: data.clone(),
+                                mode: if looped {
+                                    crate::audio::sfx::SfxMode::Loop
+                                } else {
+                                    crate::audio::sfx::SfxMode::Once
+                                },
+                                volume: 1.0,
+                            });
+                        }
+                        if let Ok(mut guard) = preview.lock() {
+                            if guard.is_none() {
+                                *guard = crate::audio::preview::PreviewEngine::open_default().ok();
+                                if let Some(p) = guard.as_ref() {
+                                    p.set_volume(preview_volume);
+                                }
+                            }
+                            if let Some(p) = guard.as_ref() {
+                                p.play(data, looped);
+                            }
+                        }
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_for_worker.upgrade() {
+                                ui.set_audio_current_name(entry.name.into());
+                                ui.set_player_playing(true);
+                            }
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_for_worker.upgrade() {
+                                ui.set_error_text(error.user_message().into());
+                            }
+                        });
+                    }
                 }
             });
         });
     }
     {
         let engine = engine.clone();
-        ui.on_audio_progress_edited(move |position| { if let Ok(sender) = engine.sfx_sender() { let _ = sender.send(crate::audio::sfx::SfxCommand::Seek(position)); } });
+        ui.on_audio_progress_edited(move |position| {
+            if let Ok(sender) = engine.sfx_sender() {
+                let _ = sender.send(crate::audio::sfx::SfxCommand::Seek(position));
+            }
+        });
     }
     {
         let ui_weak = ui.as_weak();
         let engine = engine.clone();
+        let cache = cache.clone();
         let preview = preview.clone();
         ui.on_audio_stop(move || {
-            if let Ok(sender) = engine.sfx_sender() { let _ = sender.send(crate::audio::sfx::SfxCommand::StopAll); }
-            if let Ok(guard) = preview.lock() { if let Some(preview) = guard.as_ref() { preview.stop_source(); } }
-            if let Some(ui) = ui_weak.upgrade() { ui.set_player_playing(false); }
+            if let Some(cancel) = cache.borrow_mut().audio_cancel.take() {
+                cancel.store(true, Ordering::Release);
+            }
+            if let Ok(sender) = engine.sfx_sender() {
+                let _ = sender.send(crate::audio::sfx::SfxCommand::StopAll);
+            }
+            if let Ok(guard) = preview.lock() {
+                if let Some(preview) = guard.as_ref() {
+                    preview.stop_source();
+                }
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_player_playing(false);
+            }
         });
     }
     {
@@ -501,32 +818,132 @@ fn wire_callbacks(
         ui.on_start_stop(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
             if engine.is_running() {
-                engine.stop(); restore_default_mics(&saved_mics); ui.set_running(false); ui.set_status_text("未运行".into()); ui.set_status_kind(0); ui.set_error_text("".into()); return;
+                engine.stop();
+                restore_default_mics(&saved_mics);
+                ui.set_running(false);
+                ui.set_status_text("未运行".into());
+                ui.set_status_kind(0);
+                ui.set_error_text("".into());
+                return;
             }
-            let (pid, extra_pids, dest, output_ids, mic_id, set_default, process_name, process_names, mix_mic) = {
+            let (
+                pid,
+                extra_pids,
+                dest,
+                output_ids,
+                mic_id,
+                set_default,
+                process_name,
+                process_names,
+                mix_mic,
+            ) = {
                 let c = cache.borrow();
-                let pid = c.pids.get(ui.get_process_index() as usize).copied().filter(|p| *p != 0);
+                let pid = c
+                    .pids
+                    .get(ui.get_process_index() as usize)
+                    .copied()
+                    .filter(|p| *p != 0);
                 let mut selected = c.selected_pids.clone();
-                if selected.is_empty() { if let Some(pid) = pid { selected.push(pid); } }
+                if selected.is_empty() {
+                    if let Some(pid) = pid {
+                        selected.push(pid);
+                    }
+                }
                 let primary = selected.first().copied().or(pid);
                 let extra = selected.iter().skip(1).copied().collect::<Vec<_>>();
                 let dest_index = ui.get_device_index() as usize;
                 let dest = c.dests.get(dest_index).cloned();
-                let output_ids = c.dests.iter().enumerate().filter(|(i, _)| c.device_selected.get(*i).copied().unwrap_or(false)).map(|(_, d)| d.render_id.clone()).collect::<Vec<_>>();
-                let output_ids = if output_ids.is_empty() { dest.as_ref().map(|d| vec![d.render_id.clone()]).unwrap_or_default() } else { output_ids };
+                let output_ids = c
+                    .dests
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| c.device_selected.get(*i).copied().unwrap_or(false))
+                    .map(|(_, d)| d.render_id.clone())
+                    .collect::<Vec<_>>();
+                let output_ids = if output_ids.is_empty() {
+                    dest.as_ref()
+                        .map(|d| vec![d.render_id.clone()])
+                        .unwrap_or_default()
+                } else {
+                    output_ids
+                };
                 let mic_index = ui.get_mic_index() as usize;
-                let mic_id = if ui.get_mix_mic() { c.mic_ids.get(mic_index).filter(|s| !s.is_empty()).cloned() } else { None };
-                let names = selected.iter().filter_map(|pid| c.processes.iter().find(|p| p.pid == *pid).map(|p| p.name.clone())).collect::<Vec<_>>();
-                (primary, extra, dest, output_ids, mic_id, c.set_default_mic, names.first().cloned(), names, ui.get_mix_mic())
+                let mic_id = if ui.get_mix_mic() {
+                    c.mic_ids.get(mic_index).filter(|s| !s.is_empty()).cloned()
+                } else {
+                    None
+                };
+                let names = selected
+                    .iter()
+                    .filter_map(|pid| {
+                        c.processes
+                            .iter()
+                            .find(|p| p.pid == *pid)
+                            .map(|p| p.name.clone())
+                    })
+                    .collect::<Vec<_>>();
+                (
+                    primary,
+                    extra,
+                    dest,
+                    output_ids,
+                    mic_id,
+                    c.set_default_mic,
+                    names.first().cloned(),
+                    names,
+                    ui.get_mix_mic(),
+                )
             };
-            let (Some(pid), Some(dest)) = (pid, dest) else { ui.set_error_text("请选择进程和输出设备".into()); return; };
-            engine.set_volume(ui.get_volume() / 100.0); engine.set_mic_volume(ui.get_mic_volume() / 100.0); engine.set_master_volume(ui.get_master_volume() / 100.0);
-            let start_result = engine.open_outputs(&output_ids)
+            let (Some(pid), Some(dest)) = (pid, dest) else {
+                ui.set_error_text("请选择进程和输出设备".into());
+                return;
+            };
+            engine.set_volume(ui.get_volume() / 100.0);
+            engine.set_mic_volume(ui.get_mic_volume() / 100.0);
+            engine.set_master_volume(ui.get_master_volume() / 100.0);
+            let start_result = engine
+                .open_outputs(&output_ids)
                 .and_then(|_| engine.set_process_source(pid))
-                .and_then(|_| { for (slot, extra_pid) in extra_pids.iter().enumerate() { engine.add_process_source(*extra_pid, slot + 1)?; } engine.set_mic_source(mic_id.as_deref()) });
+                .and_then(|_| {
+                    for (slot, extra_pid) in extra_pids.iter().enumerate() {
+                        engine.add_process_source(*extra_pid, slot + 1)?;
+                    }
+                    engine.set_mic_source(mic_id.as_deref())
+                });
             match start_result {
-                Ok(()) => { let c = cache.borrow(); if c.set_default_render { let _ = policy::set_default_render(&dest.render_id); } if c.set_default_communications { let _ = policy::set_default_communications(&dest.render_id); } drop(c); let mut config = app_config.borrow_mut(); config.route.process_name = process_name; config.route.process_names = process_names; config.route.mix_mic = mix_mic; config.output.device_id = Some(dest.render_id.clone()); config.output.device_name = Some(dest.label.clone()); config.output.mic_id = dest.capture_id.clone(); config.output.mic_name = dest.capture_name.clone(); config.output.set_default_mic = set_default; config::save(&config); ui.set_running(true); ui.set_status_text("运行中".into()); ui.set_status_kind(1); ui.set_error_text("".into()); apply_virtual_mic_route(&ui, &dest, set_default, &saved_mics); }
-                Err(e) => { engine.stop(); tracing::warn!("start failed: {e}"); ui.set_running(false); ui.set_status_text("错误".into()); ui.set_status_kind(3); ui.set_error_text(e.user_message().into()); }
+                Ok(()) => {
+                    let c = cache.borrow();
+                    if c.set_default_render {
+                        let _ = policy::set_default_render(&dest.render_id);
+                    }
+                    if c.set_default_communications {
+                        let _ = policy::set_default_communications(&dest.render_id);
+                    }
+                    drop(c);
+                    let mut config = app_config.borrow_mut();
+                    config.route.process_name = process_name;
+                    config.route.process_names = process_names;
+                    config.route.mix_mic = mix_mic;
+                    config.output.device_id = Some(dest.render_id.clone());
+                    config.output.device_name = Some(dest.label.clone());
+                    config.output.mic_id = dest.capture_id.clone();
+                    config.output.mic_name = dest.capture_name.clone();
+                    config.output.set_default_mic = set_default;
+                    config::save(&config);
+                    ui.set_running(true);
+                    ui.set_status_text("运行中".into());
+                    ui.set_status_kind(1);
+                    ui.set_error_text("".into());
+                    apply_virtual_mic_route(&ui, &dest, set_default, &saved_mics);
+                }
+                Err(e) => {
+                    engine.stop();
+                    tracing::warn!("start failed: {e}");
+                    ui.set_running(false);
+                    ui.set_status_text("错误".into());
+                    ui.set_status_kind(3);
+                    ui.set_error_text(e.user_message().into());
+                }
             }
         });
     }
@@ -541,7 +958,9 @@ fn start_hotkey(ui: &MainWindow, hotkey: &Rc<RefCell<config::Hotkey>>) -> Hotkey
         Arc::new(move || {
             let ui_weak = ui_weak.clone();
             let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = ui_weak.upgrade() { ui.invoke_start_stop(); }
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.invoke_start_stop();
+                }
             });
         }),
     )
@@ -612,9 +1031,21 @@ fn start_status_timer(
         }
 
         let running = engine_poll.is_running();
-        let cap = if running { engine_poll.sample_capture_peak() } else { 0.0 };
-        let mic = if running { engine_poll.sample_mic_peak() } else { 0.0 };
-        let rend = if running { engine_poll.sample_render_peak() } else { 0.0 };
+        let cap = if running {
+            engine_poll.sample_capture_peak()
+        } else {
+            0.0
+        };
+        let mic = if running {
+            engine_poll.sample_mic_peak()
+        } else {
+            0.0
+        };
+        let rend = if running {
+            engine_poll.sample_render_peak()
+        } else {
+            0.0
+        };
         push_bar(&mut capture_hist.borrow_mut(), cap);
         push_bar(&mut mic_hist.borrow_mut(), mic);
         push_bar(&mut render_hist.borrow_mut(), rend);
@@ -766,19 +1197,34 @@ fn refill_devices(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>, initial: bool) 
             .as_deref()
             .and_then(|id| c.dests.iter().position(|d| d.render_id == id))
             .or_else(|| {
-                if initial { c.dests.iter().position(|d| d.capture_id.is_some()) } else { None }
+                if initial {
+                    c.dests.iter().position(|d| d.capture_id.is_some())
+                } else {
+                    None
+                }
             })
             .unwrap_or(0);
-        let cable = c.dests.iter().any(|d| vbcable::device_looks_like_cable(&d.label) || d.capture_id.is_some());
+        let cable = c
+            .dests
+            .iter()
+            .any(|d| vbcable::device_looks_like_cable(&d.label) || d.capture_id.is_some());
         let picked_is_mic = c.dests.get(idx).is_some_and(|d| d.capture_id.is_some());
         (labels, idx, cable, picked_is_mic)
     };
 
     let selected = {
         let c = cache.borrow();
-        if c.device_selected.len() == c.dests.len() { c.device_selected.clone() } else { vec![false; c.dests.len()] }
+        if c.device_selected.len() == c.dests.len() {
+            c.device_selected.clone()
+        } else {
+            vec![false; c.dests.len()]
+        }
     };
-    let selected = if selected.iter().any(|v| *v) { selected } else { vec![false; cache.borrow().dests.len()] };
+    let selected = if selected.iter().any(|v| *v) {
+        selected
+    } else {
+        vec![false; cache.borrow().dests.len()]
+    };
     cache.borrow_mut().device_selected = selected.clone();
     ui.set_device_selected(ModelRc::new(VecModel::from(selected)));
     ui.set_devices(ModelRc::new(VecModel::from(labels)));
@@ -799,23 +1245,48 @@ fn refill_devices(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>, initial: bool) 
 fn audio_categories(cache: &Rc<RefCell<UiCache>>) -> Vec<slint::SharedString> {
     let c = cache.borrow();
     let mut names = vec!["全部".to_string(), "未分类".to_string()];
-    for name in &c.audio_categories { if !names.contains(name) { names.push(name.clone()); } }
-    for entry in &c.audio_entries { if !names.contains(&entry.category) { names.push(entry.category.clone()); } }
+    for name in &c.audio_categories {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    for entry in &c.audio_entries {
+        if !names.contains(&entry.category) {
+            names.push(entry.category.clone());
+        }
+    }
     names.into_iter().map(Into::into).collect()
 }
 /// 按持久化的 ID / 名称恢复进程、输出设备与物理麦选择。
-fn restore_saved_selection(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>, saved: &config::AppConfig) {
+fn restore_saved_selection(
+    ui: &MainWindow,
+    cache: &Rc<RefCell<UiCache>>,
+    saved: &config::AppConfig,
+) {
     {
         let c = cache.borrow();
         if let Some(name) = saved.route.process_name.as_deref()
-            && let Some(pid) = c.processes.iter().find(|p| p.name.eq_ignore_ascii_case(name)).map(|p| p.pid)
+            && let Some(pid) = c
+                .processes
+                .iter()
+                .find(|p| p.name.eq_ignore_ascii_case(name))
+                .map(|p| p.pid)
             && let Some(index) = c.pids.iter().position(|v| *v == pid)
         {
             ui.set_process_index(index as i32);
         }
-        let device_index = saved.output.device_id.as_deref()
+        let device_index = saved
+            .output
+            .device_id
+            .as_deref()
             .and_then(|id| c.dests.iter().position(|d| d.render_id == id))
-            .or_else(|| saved.output.device_name.as_deref().and_then(|name| c.dests.iter().position(|d| d.label == name)));
+            .or_else(|| {
+                saved
+                    .output
+                    .device_name
+                    .as_deref()
+                    .and_then(|name| c.dests.iter().position(|d| d.label == name))
+            });
         if let Some(index) = device_index {
             ui.set_device_index(index as i32);
         }
@@ -829,7 +1300,11 @@ fn restore_saved_selection(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>, saved:
 }
 
 /// 退出前写回当前选择与混音值。
-fn persist_config(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>, app_config: &Rc<RefCell<config::AppConfig>>) {
+fn persist_config(
+    ui: &MainWindow,
+    cache: &Rc<RefCell<UiCache>>,
+    app_config: &Rc<RefCell<config::AppConfig>>,
+) {
     let c = cache.borrow();
     let mut saved = app_config.borrow_mut();
     saved.audio_entries = c.audio_entries.clone();
@@ -838,12 +1313,24 @@ fn persist_config(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>, app_config: &Rc
     saved.output.set_default_render = c.set_default_render;
     saved.output.set_default_communications = c.set_default_communications;
     saved.route.mix_mic = ui.get_mix_mic();
-    saved.output.device_name = c.dests.get(ui.get_device_index() as usize).map(|d| d.label.clone());
+    saved.output.device_name = c
+        .dests
+        .get(ui.get_device_index() as usize)
+        .map(|d| d.label.clone());
     let mic_index = ui.get_mic_index() as usize;
     saved.output.mic_id = c.mic_ids.get(mic_index).filter(|v| !v.is_empty()).cloned();
-    saved.output.mic_name = c.mic_names.get(mic_index).filter(|v| !v.is_empty()).cloned();
+    saved.output.mic_name = c
+        .mic_names
+        .get(mic_index)
+        .filter(|v| !v.is_empty())
+        .cloned();
     let pid = c.pids.get(ui.get_process_index() as usize).copied();
-    saved.route.process_name = pid.and_then(|pid| c.processes.iter().find(|p| p.pid == pid).map(|p| p.name.clone()));
+    saved.route.process_name = pid.and_then(|pid| {
+        c.processes
+            .iter()
+            .find(|p| p.pid == pid)
+            .map(|p| p.name.clone())
+    });
     saved.mix.process = (ui.get_volume() / 100.0).clamp(0.0, 1.0);
     saved.mix.mic = (ui.get_mic_volume() / 100.0).clamp(0.0, 1.0);
     saved.mix.master = (ui.get_master_volume() / 100.0).clamp(0.0, 1.0);
@@ -873,12 +1360,21 @@ fn update_output_text(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>) {
 
 /// 按分类与搜索词更新右侧音频列表。
 fn update_audio_list(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>) {
-    let (category, search) = { let c = cache.borrow(); (c.audio_category.clone(), c.audio_search.to_ascii_lowercase()) };
+    let (category, search) = {
+        let c = cache.borrow();
+        (
+            c.audio_category.clone(),
+            c.audio_search.to_ascii_lowercase(),
+        )
+    };
     let c = cache.borrow();
-    let names: Vec<slint::SharedString> = c.audio_entries.iter()
+    let names: Vec<slint::SharedString> = c
+        .audio_entries
+        .iter()
         .filter(|entry| category == "全部" || entry.category == category)
         .filter(|entry| search.is_empty() || entry.name.to_ascii_lowercase().contains(&search))
-        .map(|entry| entry.name.clone().into()).collect();
+        .map(|entry| entry.name.clone().into())
+        .collect();
     drop(c);
     ui.set_audio_entries(ModelRc::new(VecModel::from(names)));
     ui.set_audio_entry_index(-1);
@@ -897,7 +1393,9 @@ fn about_text(cache: &Rc<RefCell<UiCache>>) -> String {
 /// 使用 Windows 原生文件选择器选择音频文件。
 fn select_audio_file() -> Option<PathBuf> {
     let mut file = [0u16; 32_768];
-    let filter: Vec<u16> = "音频文件\0*.wav;*.mp3;*.mp4;*.m4a;*.flac;*.wma\0所有文件\0*.*\0\0".encode_utf16().collect();
+    let filter: Vec<u16> = "支持的音频\0*.wav;*.mp3;*.mp4;*.m4a;*.flac;*.wma\0\0"
+        .encode_utf16()
+        .collect();
     let mut dialog = OPENFILENAMEW::default();
     dialog.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
     dialog.hwndOwner = HWND::default();
@@ -905,7 +1403,9 @@ fn select_audio_file() -> Option<PathBuf> {
     dialog.lpstrFile = PWSTR(file.as_mut_ptr());
     dialog.nMaxFile = file.len() as u32;
     dialog.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-    if !unsafe { GetOpenFileNameW(&mut dialog).as_bool() } { return None; }
+    if !unsafe { GetOpenFileNameW(&mut dialog).as_bool() } {
+        return None;
+    }
     let len = file.iter().position(|v| *v == 0).unwrap_or(file.len());
     Some(PathBuf::from(String::from_utf16_lossy(&file[..len])))
 }
