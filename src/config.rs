@@ -168,6 +168,9 @@ pub struct AudioEntry {
     /// 是否循环。
     #[serde(default)]
     pub loop_playback: bool,
+    /// 音频项触发热键。
+    #[serde(default)]
+    pub hotkey: Option<Hotkey>,
 }
 
 fn default_category() -> String { "未分类".into() }

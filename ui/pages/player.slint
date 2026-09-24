@@ -1,131 +1,21 @@
-//! 音频库：分类树、文件列表与底部播放条。
+//! 音频库页面。
 import { LineEdit, CheckBox, Slider } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Card } from "../components/card.slint";
 import { PmButton } from "../components/button.slint";
-
 export component PlayerPage inherits Rectangle {
-    in-out property <string> output-name: "";
-    in-out property <[string]> categories: ["全部", "未分类"];
-    in-out property <int> category-index: 0;
-    in-out property <string> category-edit-name: "";
-    in-out property <[string]> entries: [];
-    in-out property <int> entry-index: -1;
-    in-out property <float> progress: 0;
-    in-out property <string> search: "";
-    in-out property <string> current-name: "";
-    in-out property <string> current-position: "";
-    in-out property <bool> loop: false;
-    in-out property <bool> playing: false;
-    in-out property <bool> category-menu-open: false;
-    callback category-changed(int);
-    callback category-context(int);
-    callback category-new();
-    callback category-rename();
-    callback category-delete();
-    callback search-changed(string);
-    callback entry-double-clicked(int);
-    callback progress-edited(float);
-    callback add-files();
-    callback stop();
-    callback open-settings();
-    background: transparent;
-
-    VerticalLayout {
-        padding: Theme.padPage; spacing: Theme.gap;
-        HorizontalLayout {
-            height: Theme.controlHeight; spacing: 8px;
-            PmButton { label: "+ 添加文件"; clicked => { root.add-files(); } }
-            LineEdit { horizontal-stretch: 1; placeholder-text: "搜索音频…"; text <=> root.search; edited(t) => { root.search-changed(t); } }
-            Text { text: root.output-name == "" ? "目标：未选择" : "目标：" + root.output-name; color: Theme.text2; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; }
-        }
-        HorizontalLayout { vertical-stretch: 1; spacing: Theme.gap;
-            Card {
-                width: 250px;
-                VerticalLayout {
-                    Text { text: "音频分类"; color: Theme.text2; font-size: 12px; font-weight: 600; }
-                    Text { text: "右键分类进行管理"; color: Theme.text3; font-size: 12px; }
-                    VerticalLayout {
-                        vertical-stretch: 1;
-                        for category[index] in root.categories: Rectangle {
-                            height: 32px;
-                            background: index == root.category-index ? Theme.accentSoft : transparent;
-                            border-radius: Theme.radiusControl;
-                            Text { text: category; x: 12px; color: index == root.category-index ? Theme.accent : Theme.text; vertical-alignment: TextVerticalAlignment.center; }
-                            TouchArea {
-                                clicked => { root.category-index = index; root.category-changed(index); root.category-menu-open = false; }
-                                pointer-event(event) => {
-                                    if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
-                                        root.category-index = index;
-                                        root.category-context(index);
-                                        root.category-menu-open = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Card {
-                horizontal-stretch: 1; min-width: 0px;
-                VerticalLayout {
-                    HorizontalLayout {
-                        height: Theme.controlHeight;
-                        Text { text: "索引"; width: 52px; color: Theme.text2; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; }
-                        Text { text: "音频名称"; horizontal-stretch: 1; color: Theme.text2; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; }
-                        Text { text: "状态"; width: 64px; color: Theme.text2; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; }
-                    }
-                    VerticalLayout {
-                        vertical-stretch: 1;
-                        for name[index] in root.entries: Rectangle {
-                            height: 32px;
-                            background: index == root.entry-index ? Theme.accentSoft : transparent;
-                            border-radius: Theme.radiusControl;
-                            Text { text: "\\{index + 1}"; x: 8px; width: 44px; color: Theme.text2; vertical-alignment: TextVerticalAlignment.center; }
-                            Text { text: name; x: 56px; width: parent.width - 130px; color: Theme.text; vertical-alignment: TextVerticalAlignment.center; overflow: elide; }
-                            Text { text: index == root.entry-index && root.playing ? "播放中" : ""; x: parent.width - 66px; width: 58px; color: Theme.accent; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; }
-                            TouchArea { clicked => { root.entry-index = index; root.entry-double-clicked(index); } }
-                        }
-                    }
-                    Text { text: "双击音频名称播放；长标题在列内截断。"; color: Theme.text3; font-size: 12px; }
-                }
-            }
-        }
-        Card {
-            height: 70px;
-            VerticalLayout {
-                HorizontalLayout {
-                    height: Theme.controlHeight; spacing: 8px;
-                    Text { text: root.playing ? "▶" : "■"; width: 20px; color: root.playing ? Theme.accent : Theme.text3; vertical-alignment: TextVerticalAlignment.center; }
-                    Text { text: root.current-name == "" ? "未播放" : root.current-name; width: 220px; color: Theme.text; font-weight: 600; vertical-alignment: TextVerticalAlignment.center; overflow: elide; }
-                    Slider { horizontal-stretch: 1; minimum: 0; maximum: 1; value <=> root.progress; changed(v) => { root.progress-edited(v); } }
-                    Text { text: root.current-position; width: 90px; color: Theme.text2; vertical-alignment: TextVerticalAlignment.center; }
-                    CheckBox { text: "循环"; checked <=> root.loop; }
-                    PmButton { label: "停止"; enabled: root.playing; clicked => { root.stop(); } }
-                }
-            }
-        }
-    }
-
-    if root.category-menu-open: Rectangle {
-        x: Theme.padPage + 8px;
-        y: Theme.padPage + Theme.topBarHeight + Theme.controlHeight + Theme.gap + 52px;
-        width: 226px; height: 150px;
-        background: Theme.card; border-color: Theme.border; border-width: 1px; border-radius: Theme.radiusCard;
-        VerticalLayout {
-            padding: 8px; spacing: 6px;
-            HorizontalLayout {
-                height: Theme.controlHeight;
-                Text { text: "分类操作"; horizontal-stretch: 1; color: Theme.text; font-weight: 600; vertical-alignment: TextVerticalAlignment.center; }
-                PmButton { label: "×"; clicked => { root.category-menu-open = false; } }
-            }
-            PmButton { label: "新建分类"; clicked => { root.category-new(); root.category-menu-open = false; } }
-            LineEdit { placeholder-text: "新名称"; text <=> root.category-edit-name; }
-            HorizontalLayout {
-                spacing: 6px;
-                PmButton { label: "重命名"; enabled: root.category-index > 1; clicked => { root.category-rename(); root.category-menu-open = false; } }
-                PmButton { label: "删除"; danger: true; enabled: root.category-index > 1; clicked => { root.category-delete(); root.category-menu-open = false; } }
-            }
-        }
-    }
+ in-out property <string> output-name: ""; in-out property <[string]> categories: ["全部", "未分类"]; in-out property <int> category-index: 0; in-out property <string> category-edit-name: ""; in-out property <[string]> entries: []; in-out property <int> entry-index: -1; in-out property <float> progress: 0; in-out property <string> search: ""; in-out property <string> current-name: ""; in-out property <string> current-position: ""; in-out property <bool> loop: false; in-out property <bool> playing: false; in-out property <bool> category-menu-open: false; in-out property <bool> entry-menu-open: false; in-out property <int> entry-menu-index: -1; in-out property <string> entry-edit-name: "";
+ callback category-changed(int); callback category-context(int); callback category-new(); callback category-rename(); callback category-delete(); callback entry-context(int); callback entry-play(int); callback entry-remove(); callback entry-hotkey(); callback entry-remove-hotkey(); callback entry-explorer-rename(); callback entry-edit-tags(); callback entry-save-tags(); callback entry-edit-file(); callback search-changed(string); callback entry-double-clicked(int); callback progress-edited(float); callback add-files(); callback stop(); callback open-settings();
+ background: transparent;
+ VerticalLayout {
+  padding: Theme.padPage; spacing: Theme.gap;
+  HorizontalLayout { height: Theme.controlHeight; spacing: 8px; PmButton { label: "+ 添加文件"; clicked => { root.add-files(); } } LineEdit { horizontal-stretch: 1; placeholder-text: "搜索音频…"; text <=> root.search; edited(t) => { root.search-changed(t); } } Text { text: root.output-name == "" ? "目标：未选择" : "目标：" + root.output-name; color: Theme.text2; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; } }
+  HorizontalLayout { vertical-stretch: 1; spacing: Theme.gap;
+   Card { width: 250px; VerticalLayout { Text { text: "音频分类"; color: Theme.text2; font-size: 12px; font-weight: 600; } Text { text: "右键分类进行管理"; color: Theme.text3; font-size: 12px; } VerticalLayout { vertical-stretch: 1; for category[index] in root.categories: Rectangle { height: 32px; background: index == root.category-index ? Theme.accentSoft : transparent; border-radius: Theme.radiusControl; Text { text: category; x: 12px; color: index == root.category-index ? Theme.accent : Theme.text; vertical-alignment: TextVerticalAlignment.center; } TouchArea { clicked => { root.category-index = index; root.category-changed(index); root.category-menu-open = false; root.entry-menu-open = false; } pointer-event(event) => { if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) { root.category-index = index; root.category-context(index); root.category-menu-open = true; root.entry-menu-open = false; } } } } } } }
+   Card { horizontal-stretch: 1; min-width: 0px; VerticalLayout { HorizontalLayout { height: Theme.controlHeight; Text { text: "索引"; width: 52px; color: Theme.text2; } Text { text: "音频名称"; horizontal-stretch: 1; color: Theme.text2; } Text { text: "状态"; width: 64px; color: Theme.text2; } } VerticalLayout { vertical-stretch: 1; for name[index] in root.entries: Rectangle { height: 32px; background: index == root.entry-index ? Theme.accentSoft : transparent; Text { text: "\\{index + 1}"; x: 8px; width: 44px; color: Theme.text2; } Text { text: name; x: 56px; width: parent.width - 130px; color: Theme.text; overflow: elide; } Text { text: index == root.entry-index && root.playing ? "播放中" : ""; x: parent.width - 66px; width: 58px; color: Theme.accent; } TouchArea { clicked => { root.entry-index = index; root.entry-double-clicked(index); root.entry-menu-open = false; } pointer-event(event) => { if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) { root.entry-index = index; root.entry-menu-index = index; root.entry-context(index); root.entry-menu-open = true; root.category-menu-open = false; } } } } } Text { text: "双击播放；右键音频可选择播放目标和文件操作。"; color: Theme.text3; font-size: 12px; } } }
+  }
+  Card { height: 70px; VerticalLayout { HorizontalLayout { height: Theme.controlHeight; spacing: 8px; Text { text: root.playing ? "▶" : "■"; width: 20px; color: root.playing ? Theme.accent : Theme.text3; } Text { text: root.current-name == "" ? "未播放" : root.current-name; width: 220px; color: Theme.text; overflow: elide; } Slider { horizontal-stretch: 1; minimum: 0; maximum: 1; value <=> root.progress; changed(v) => { root.progress-edited(v); } } Text { text: root.current-position; width: 90px; color: Theme.text2; } CheckBox { text: "循环"; checked <=> root.loop; } PmButton { label: "停止"; enabled: root.playing; clicked => { root.stop(); } } } } }
+ }
+ if root.category-menu-open: Rectangle { x: 18px; y: 86px; width: 230px; height: 156px; background: Theme.card; border-color: Theme.border; border-width: 1px; border-radius: Theme.radiusCard; VerticalLayout { padding: 8px; spacing: 6px; Text { text: "分类右键菜单"; color: Theme.text; } PmButton { label: "新建分类"; clicked => { root.category-new(); root.category-menu-open = false; } } LineEdit { placeholder-text: "重命名为…"; text <=> root.category-edit-name; } HorizontalLayout { spacing: 6px; PmButton { label: "重命名"; enabled: root.category-index > 1; clicked => { root.category-rename(); root.category-menu-open = false; } } PmButton { label: "删除"; danger: true; enabled: root.category-index > 1; clicked => { root.category-delete(); root.category-menu-open = false; } } } } }
+ if root.entry-menu-open: Rectangle { x: 285px; y: 86px; width: 280px; height: 330px; background: Theme.card; border-color: Theme.border; border-width: 1px; border-radius: Theme.radiusCard; VerticalLayout { padding: 8px; spacing: 5px; Text { text: "音频右键菜单"; color: Theme.text; } PmButton { label: "播放（扬声器和麦克风）"; clicked => { root.entry-play(0); root.entry-menu-open = false; } } PmButton { label: "在扬声器上播放"; clicked => { root.entry-play(1); root.entry-menu-open = false; } } PmButton { label: "在麦克风上播放"; clicked => { root.entry-play(2); root.entry-menu-open = false; } } PmButton { label: "移除"; danger: true; clicked => { root.entry-remove(); root.entry-menu-open = false; } } PmButton { label: "设置热键"; clicked => { root.entry-hotkey(); root.entry-menu-open = false; } } PmButton { label: "移除热键"; clicked => { root.entry-remove-hotkey(); root.entry-menu-open = false; } } PmButton { label: "在资源管理器中选择/重命名文件"; clicked => { root.entry-explorer-rename(); root.entry-menu-open = false; } } PmButton { label: "编辑标签文本"; clicked => { root.entry-edit-tags(); } } if root.entry-edit-name != "" : HorizontalLayout { LineEdit { text <=> root.entry-edit-name; } PmButton { label: "保存"; clicked => { root.entry-save-tags(); root.entry-edit-name = ""; } } } PmButton { label: "编辑文件"; clicked => { root.entry-edit-file(); root.entry-menu-open = false; } } } }
 }

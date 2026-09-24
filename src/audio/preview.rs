@@ -1,6 +1,7 @@
 //! 独立本地预览输出：不进入虚拟麦克风，只写系统播放设备。
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -136,6 +137,11 @@ impl PreviewEngine {
         }
     }
 
+    /// 播放后台解码的有界音频块。
+    pub fn play_stream(&self, info: crate::audio::decode::MediaInfo, rx: Receiver<crate::audio::sfx::StreamChunk>, looped: bool) {
+        self.stop_source(); self.ring.clear(); let stop = Arc::new(AtomicBool::new(false)); let stop_thread = stop.clone(); let ring = self.ring.clone(); let target = self.target;
+        let join = thread::Builder::new().name("preview-stream".into()).spawn(move || { let src_channels = usize::from(info.channels.max(1)); let dst_channels = usize::from(target.channels.max(1)); let step = f64::from(info.sample_rate) / f64::from(target.sample_rate); let mut buffer = Vec::with_capacity(64_000); let mut pos = 0.0f64; loop { if stop_thread.load(Ordering::Acquire) { break; } while buffer.len() < src_channels * 24_000 { match rx.try_recv() { Ok(chunk) => { buffer.extend_from_slice(&chunk.samples); if chunk.done && !looped { break; } }, Err(_) => break } } if buffer.is_empty() { thread::sleep(Duration::from_millis(5)); continue; } let mut out = Vec::with_capacity(target.sample_rate as usize / 20 * dst_channels); for _ in 0..(target.sample_rate as usize / 20).max(64) { let frame = pos.floor() as usize; if frame >= buffer.len() / src_channels { break; } for ch in 0..dst_channels { out.push(buffer[frame * src_channels + ch.min(src_channels - 1)]); } pos += step; } if !out.is_empty() { ring.push_latest(&out); let drop = pos.floor() as usize; if drop > 2048 { let count = drop.min(buffer.len() / src_channels).saturating_sub(1) * src_channels; if count > 0 { buffer.drain(..count); pos -= (count / src_channels) as f64; } } } else { thread::sleep(Duration::from_millis(5)); } } }).ok(); if let Some(join) = join { if let Ok(mut slot) = self.source.lock() { *slot = Some(SourceThread { stop, join }); } }
+    }
     /// 停止当前试听源。
     pub fn stop_source(&self) {
         let source = self.source.lock().ok().and_then(|mut slot| slot.take());

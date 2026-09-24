@@ -23,9 +23,19 @@ pub enum SfxMode {
 }
 
 /// 声板控制命令。
+pub struct StreamChunk {
+    /// 交错 f32 音频块。
+    pub samples: Vec<f32>,
+    /// 是否到达文件尾。
+    pub done: bool,
+}
+
+/// 声板控制命令。
 pub enum SfxCommand {
-    /// 播放一个已解码 WAV。
+    /// 播放一个已经解码的短 WAV。
     Play { data: Arc<WavData>, mode: SfxMode, volume: f32 },
+    /// 消费后台解码的有界音频流。
+    PlayStream { sample_rate: u32, channels: u16, mode: SfxMode, volume: f32, rx: Receiver<StreamChunk> },
     /// 将当前播放位置跳到 0..1。
     Seek(f32),
     /// 停止当前声音。
@@ -48,81 +58,71 @@ pub fn run_sfx_loop(
 ) {
     let channels = render.channels as usize;
     let frames = (render.sample_rate as usize / 100).max(64);
-    let mut players: Vec<SfxPlayer> = Vec::with_capacity(8);
+    let mut players: Vec<SfxPlayer> = Vec::with_capacity(1);
     let mut block = vec![0.0f32; frames * channels];
     while !stop.load(std::sync::atomic::Ordering::Acquire) {
         while let Ok(command) = rx.try_recv() {
             match command {
-                SfxCommand::Play { data, mode, volume } => {
-                    players.clear();
-                    players.push(SfxPlayer::new(data, mode, volume));
-                }
-                SfxCommand::Seek(position) => {
-                    if let Some(player) = players.first_mut() {
-                        player.position = (position.clamp(0.0, 1.0) as f64) * player.data.samples.len() as f64;
-                    }
-                }
+                SfxCommand::Play { data, mode, volume } => { players.clear(); players.push(SfxPlayer::Memory(MemoryPlayer::new(data, mode, volume))); }
+                SfxCommand::PlayStream { sample_rate, channels, mode, volume, rx } => { players.clear(); players.push(SfxPlayer::Stream(StreamPlayer::new(sample_rate, channels, mode, volume, rx))); }
+                SfxCommand::Seek(position) => if let Some(player) = players.first_mut() { player.seek(position); },
                 SfxCommand::Stop | SfxCommand::StopAll => players.clear(),
             }
         }
         block.fill(0.0);
-        players.retain_mut(|player| {
-            player.mix_into(&mut block, render);
-            !player.finished
-        });
+        players.retain_mut(|player| { player.mix_into(&mut block, render); !player.finished() });
         ring.push_latest(&block);
         thread::sleep(Duration::from_millis(10));
     }
 }
 
-struct SfxPlayer {
-    data: Arc<WavData>,
-    mode: SfxMode,
-    volume: f32,
-    position: f64,
-    finished: bool,
+enum SfxPlayer { Memory(MemoryPlayer), Stream(StreamPlayer) }
+impl SfxPlayer {
+    fn finished(&self) -> bool { match self { Self::Memory(p) => p.finished, Self::Stream(p) => p.finished } }
+    fn seek(&mut self, position: f32) { if let Self::Memory(p) = self { p.position = position.clamp(0.0, 1.0) as f64 * p.data.samples.len() as f64; } }
+    fn mix_into(&mut self, out: &mut [f32], render: AudioFormat) { match self { Self::Memory(p) => p.mix_into(out, render), Self::Stream(p) => p.mix_into(out, render) } }
 }
 
-impl SfxPlayer {
-    fn new(data: Arc<WavData>, mode: SfxMode, volume: f32) -> Self {
-        Self { data, mode, volume: volume.clamp(0.0, 1.0), position: 0.0, finished: false }
-    }
-
+struct MemoryPlayer {
+    data: Arc<WavData>, mode: SfxMode, volume: f32, position: f64, finished: bool,
+}
+impl MemoryPlayer {
+    fn new(data: Arc<WavData>, mode: SfxMode, volume: f32) -> Self { Self { data, mode, volume: volume.clamp(0.0, 1.0), position: 0.0, finished: false } }
     fn mix_into(&mut self, out: &mut [f32], render: AudioFormat) {
-        if self.data.channels == 0 || self.data.sample_rate == 0 {
-            self.finished = true;
-            return;
-        }
-        let out_channels = render.channels as usize;
-        let src_channels = self.data.channels as usize;
-        let out_frames = out.len() / out_channels;
-        let step = f64::from(self.data.sample_rate) / f64::from(render.sample_rate);
-        for frame in 0..out_frames {
+        if self.data.channels == 0 || self.data.sample_rate == 0 { self.finished = true; return; }
+        let out_channels = render.channels as usize; let src_channels = self.data.channels as usize; let step = f64::from(self.data.sample_rate) / f64::from(render.sample_rate);
+        for (frame, dst) in out.chunks_exact_mut(out_channels).enumerate() {
             let src_frame = self.position.floor() as usize;
-            if src_frame >= self.data.samples.len() / src_channels {
-                if matches!(self.mode, SfxMode::Loop | SfxMode::Toggle) {
-                    self.position = 0.0;
-                } else {
-                    self.finished = true;
-                    break;
-                }
-            }
-            let src_frame = self.position.floor() as usize;
+            if src_frame >= self.data.samples.len() / src_channels { if matches!(self.mode, SfxMode::Loop | SfxMode::Toggle) { self.position = 0.0; continue; } self.finished = true; break; }
             let src = &self.data.samples[src_frame * src_channels..(src_frame + 1) * src_channels];
-            for channel in 0..out_channels {
-                let value = if src_channels == 1 {
-                    src[0]
-                } else if channel < src_channels {
-                    src[channel]
-                } else {
-                    src[src_channels - 1]
-                };
-                out[frame * out_channels + channel] += value * self.volume;
-            }
+            for (channel, value) in dst.iter_mut().enumerate() { *value += src[if src_channels == 1 { 0 } else { channel.min(src_channels - 1) }] * self.volume; }
             self.position += step;
         }
     }
 }
+
+struct StreamPlayer {
+    sample_rate: u32, channels: usize, mode: SfxMode, volume: f32, rx: Receiver<StreamChunk>, buffer: Vec<f32>, position: f64, done: bool, finished: bool,
+}
+impl StreamPlayer {
+    fn new(sample_rate: u32, channels: u16, mode: SfxMode, volume: f32, rx: Receiver<StreamChunk>) -> Self { Self { sample_rate, channels: channels.max(1) as usize, mode, volume: volume.clamp(0.0, 1.0), rx, buffer: Vec::with_capacity(64_000), position: 0.0, done: false, finished: false } }
+    fn pump(&mut self) { while self.buffer.len() < self.channels * 24_000 && !self.done { match self.rx.try_recv() { Ok(chunk) => { self.buffer.extend_from_slice(&chunk.samples); self.done = chunk.done; }, Err(_) => break } } }
+    fn mix_into(&mut self, out: &mut [f32], render: AudioFormat) {
+        self.pump(); if self.sample_rate == 0 { self.finished = true; return; }
+        let out_channels = render.channels as usize; let step = f64::from(self.sample_rate) / f64::from(render.sample_rate);
+        for dst in out.chunks_exact_mut(out_channels) {
+            let src_frame = self.position.floor() as usize;
+            if src_frame >= self.buffer.len() / self.channels { if self.done { self.finished = true; } break; }
+            let src = &self.buffer[src_frame * self.channels..(src_frame + 1) * self.channels];
+            for (channel, value) in dst.iter_mut().enumerate() { *value += src[if self.channels == 1 { 0 } else { channel.min(self.channels - 1) }] * self.volume; }
+            self.position += step;
+        }
+        let drop_frames = self.position.floor() as usize;
+        if drop_frames > 2048 { let drop = (drop_frames.min(self.buffer.len() / self.channels).saturating_sub(1)) * self.channels; if drop > 0 { self.buffer.drain(..drop); self.position -= (drop / self.channels) as f64; } }
+        self.pump();
+    }
+}
+
 
 #[allow(dead_code)]
 fn _f32_format(sample_rate: u32, channels: u16) -> AudioFormat {

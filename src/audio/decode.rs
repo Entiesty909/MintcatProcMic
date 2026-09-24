@@ -1,9 +1,11 @@
 //! Media Foundation 文件音频读取：mp3 / mp4 / m4a / flac / wma，视频轨只忽略不解码。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::Receiver;
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
-
+use std::sync::Arc;
+use std::thread;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::core::{GUID, PCWSTR};
@@ -286,6 +288,25 @@ impl MfReader {
             Ok(dst.len())
         }
     }
+}
+/// 启动有界解码通道，首个音频块就绪后即可开始播放。
+pub fn stream_to_channel(path: PathBuf, looped: bool, cancel: Arc<AtomicBool>) -> Result<(MediaInfo, Receiver<crate::audio::sfx::StreamChunk>), Error> {
+    let info = open(&path)?.info();
+    let (tx, rx) = std::sync::mpsc::sync_channel(32);
+    thread::Builder::new().name("audio-stream-decode".into()).spawn(move || {
+        let Ok(mut reader) = open(&path) else { return; };
+        let mut block = Vec::with_capacity(16_384);
+        loop {
+            if cancel.load(Ordering::Acquire) { break; }
+            match reader.read_block(&mut block, 16_384) {
+                Ok(0) if looped => { let _ = reader.seek_hns(0); }
+                Ok(0) => { let _ = tx.send(crate::audio::sfx::StreamChunk { samples: Vec::new(), done: true }); break; }
+                Ok(n) => { if tx.send(crate::audio::sfx::StreamChunk { samples: block[..n].to_vec(), done: false }).is_err() { break; } }
+                Err(_) => { let _ = tx.send(crate::audio::sfx::StreamChunk { samples: Vec::new(), done: true }); break; }
+            }
+        }
+    }).map_err(|_| Error::RenderInit("spawn audio stream"))?;
+    Ok((info, rx))
 }
 
 fn propvar_u64(value: PROPVARIANT) -> Option<u64> {
