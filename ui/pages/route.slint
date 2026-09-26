@@ -109,9 +109,22 @@ export component RoutePage inherits Rectangle {
             }
             HorizontalLayout {
                 spacing: 8px;
-                LineEdit { horizontal-stretch: 1; text <=> root.selected-processes; enabled: false; placeholder-text: "多个进程输入…"; }
-                PmButton { label: "加入"; enabled: !root.running; clicked => { root.process-add(); } }
-                PmButton { label: "清空"; enabled: !root.running; clicked => { root.process-clear(); } }
+                LineEdit {
+                    horizontal-stretch: 1;
+                    text <=> root.selected-processes;
+                    enabled: false;
+                    placeholder-text: "多个进程输入…";
+                }
+                PmButton {
+                    label: "加入";
+                    enabled: !root.running;
+                    clicked => { root.process-add(); }
+                }
+                PmButton {
+                    label: "清空";
+                    enabled: !root.running;
+                    clicked => { root.process-clear(); }
+                }
             }
             LevelMeter { samples: root.capture-wave; tint: Theme.ok; }
             SliderRow {

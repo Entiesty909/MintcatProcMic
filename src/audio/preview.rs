@@ -99,14 +99,12 @@ impl PreviewEngine {
                 let dst_channels = usize::from(target.channels.max(1));
                 let src_frames = data.samples.len() / src_channels;
                 let step = f64::from(data.sample_rate) / f64::from(target.sample_rate);
-                let chunk_frames = (target.sample_rate as usize / 20).max(64);
+                let chunk_frames = (target.sample_rate as usize / 50).max(64);
+                // 最多领先 render 端 5 块（约 100 ms），超出就退让；节拍由 render 决定。
+                let lead = chunk_frames * dst_channels * 5;
                 let mut pos = 0.0f64;
                 let mut out = Vec::with_capacity(chunk_frames * dst_channels);
-                let chunk_time = Duration::from_millis(50);
-                loop {
-                    if stop_thread.load(Ordering::Acquire) {
-                        break;
-                    }
+                while !stop_thread.load(Ordering::Acquire) {
                     out.clear();
                     for _ in 0..chunk_frames {
                         let frame = pos.floor() as usize;
@@ -125,8 +123,7 @@ impl PreviewEngine {
                     if out.is_empty() {
                         break;
                     }
-                    ring.push_latest(&out);
-                    thread::sleep(chunk_time);
+                    ring.push_paced(&out, lead, &stop_thread);
                 }
             })
             .ok();
@@ -138,9 +135,27 @@ impl PreviewEngine {
     }
 
     /// 播放后台解码的有界音频块。
-    pub fn play_stream(&self, info: crate::audio::decode::MediaInfo, rx: Receiver<crate::audio::sfx::StreamChunk>, looped: bool) {
-        self.stop_source(); self.ring.clear(); let stop = Arc::new(AtomicBool::new(false)); let stop_thread = stop.clone(); let ring = self.ring.clone(); let target = self.target;
-        let join = thread::Builder::new().name("preview-stream".into()).spawn(move || { let src_channels = usize::from(info.channels.max(1)); let dst_channels = usize::from(target.channels.max(1)); let step = f64::from(info.sample_rate) / f64::from(target.sample_rate); let mut buffer = Vec::with_capacity(64_000); let mut pos = 0.0f64; loop { if stop_thread.load(Ordering::Acquire) { break; } while buffer.len() < src_channels * 24_000 { match rx.try_recv() { Ok(chunk) => { buffer.extend_from_slice(&chunk.samples); if chunk.done && !looped { break; } }, Err(_) => break } } if buffer.is_empty() { thread::sleep(Duration::from_millis(5)); continue; } let mut out = Vec::with_capacity(target.sample_rate as usize / 20 * dst_channels); for _ in 0..(target.sample_rate as usize / 20).max(64) { let frame = pos.floor() as usize; if frame >= buffer.len() / src_channels { break; } for ch in 0..dst_channels { out.push(buffer[frame * src_channels + ch.min(src_channels - 1)]); } pos += step; } if !out.is_empty() { ring.push_latest(&out); let drop = pos.floor() as usize; if drop > 2048 { let count = drop.min(buffer.len() / src_channels).saturating_sub(1) * src_channels; if count > 0 { buffer.drain(..count); pos -= (count / src_channels) as f64; } } } else { thread::sleep(Duration::from_millis(5)); } } }).ok(); if let Some(join) = join { if let Ok(mut slot) = self.source.lock() { *slot = Some(SourceThread { stop, join }); } }
+    pub fn play_stream(
+        &self,
+        info: crate::audio::decode::MediaInfo,
+        rx: Receiver<crate::audio::sfx::StreamChunk>,
+        looped: bool,
+    ) {
+        self.stop_source();
+        self.ring.clear();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = stop.clone();
+        let ring = self.ring.clone();
+        let target = self.target;
+        let join = thread::Builder::new()
+            .name("preview-stream".into())
+            .spawn(move || run_stream_source(ring, target, info, rx, looped, stop_thread))
+            .ok();
+        if let Some(join) = join {
+            if let Ok(mut slot) = self.source.lock() {
+                *slot = Some(SourceThread { stop, join });
+            }
+        }
     }
     /// 停止当前试听源。
     pub fn stop_source(&self) {
@@ -148,6 +163,72 @@ impl PreviewEngine {
         if let Some(source) = source {
             source.stop.store(true, Ordering::Release);
             let _ = source.join.join();
+        }
+    }
+}
+
+/// 试听流源：把解码块重采样进 `ring`，积压超过 `lead` 就退让，节拍交给 render 线程。
+///
+/// 解码远快于实时，不按消费端节流会把环写成滚动窗口，听起来就是同一小段反复。
+pub fn run_stream_source(
+    ring: Arc<SpscRing>,
+    target: AudioFormat,
+    info: crate::audio::decode::MediaInfo,
+    rx: Receiver<crate::audio::sfx::StreamChunk>,
+    looped: bool,
+    stop: Arc<AtomicBool>,
+) {
+    let src_channels = usize::from(info.channels.max(1));
+    let dst_channels = usize::from(target.channels.max(1));
+    let step = f64::from(info.sample_rate) / f64::from(target.sample_rate);
+    let chunk_frames = (target.sample_rate as usize / 50).max(64);
+    // 最多领先 render 端 5 块（约 100 ms）。
+    let lead = chunk_frames * dst_channels * 5;
+    let mut buffer = Vec::with_capacity(64_000);
+    let mut out = Vec::with_capacity(chunk_frames * dst_channels);
+    let mut pos = 0.0f64;
+    let mut done = false;
+    while !stop.load(Ordering::Acquire) {
+        while buffer.len() < src_channels * 24_000 && !done {
+            match rx.try_recv() {
+                Ok(chunk) => {
+                    buffer.extend_from_slice(&chunk.samples);
+                    done = chunk.done;
+                }
+                Err(_) => break,
+            }
+        }
+        if buffer.is_empty() {
+            if done && !looped {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+            continue;
+        }
+        out.clear();
+        for _ in 0..chunk_frames {
+            let frame = pos.floor() as usize;
+            if frame >= buffer.len() / src_channels {
+                break;
+            }
+            for ch in 0..dst_channels {
+                out.push(buffer[frame * src_channels + ch.min(src_channels - 1)]);
+            }
+            pos += step;
+        }
+        if out.is_empty() {
+            if done && !looped {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+            continue;
+        }
+        ring.push_paced(&out, lead, &stop);
+        let consumed = (pos.floor() as usize).min(buffer.len() / src_channels);
+        if consumed > 2048 {
+            let count = consumed * src_channels;
+            buffer.drain(..count);
+            pos -= consumed as f64;
         }
     }
 }

@@ -1,7 +1,7 @@
 //! 枚举 WASAPI 端点。输出列表是全部播放设备，不靠你改过的友好名称过滤。
 
 use windows::Win32::Devices::FunctionDiscovery::{
-    PKEY_DeviceInterface_FriendlyName, PKEY_Device_DeviceDesc, PKEY_Device_FriendlyName,
+    PKEY_Device_DeviceDesc, PKEY_Device_FriendlyName, PKEY_DeviceInterface_FriendlyName,
 };
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Media::Audio::{
@@ -88,7 +88,9 @@ pub fn list_destinations(include_all: bool) -> Result<Vec<DestDevice>, Error> {
 pub fn default_capture_ids() -> Vec<(u32, String)> {
     let mut out = Vec::new();
     for (role_n, role) in [(0u32, eConsole), (1, eMultimedia), (2, eCommunications)] {
-        if let Ok(id) = default_endpoint_id(eCapture, role) { out.push((role_n, id)); }
+        if let Ok(id) = default_endpoint_id(eCapture, role) {
+            out.push((role_n, id));
+        }
     }
     out
 }
@@ -102,7 +104,9 @@ pub fn default_render_id() -> Result<String, Error> {
 pub fn default_render_ids() -> Vec<(u32, String)> {
     let mut out = Vec::new();
     for (role_n, role) in [(0u32, eConsole), (1, eMultimedia), (2, eCommunications)] {
-        if let Ok(id) = default_endpoint_id(eRender, role) { out.push((role_n, id)); }
+        if let Ok(id) = default_endpoint_id(eRender, role) {
+            out.push((role_n, id));
+        }
     }
     out
 }
@@ -192,9 +196,7 @@ fn paired_render<'a>(capture: &Endpoint, renders: &'a [Endpoint]) -> Option<&'a 
     Some(same[0])
 }
 fn same_driver(a: &Endpoint, b: &Endpoint) -> bool {
-    if !a.adapter.is_empty()
-        && !b.adapter.is_empty()
-        && a.adapter.eq_ignore_ascii_case(&b.adapter)
+    if !a.adapter.is_empty() && !b.adapter.is_empty() && a.adapter.eq_ignore_ascii_case(&b.adapter)
     {
         return driver_family(a) == driver_family(b);
     }
@@ -233,7 +235,8 @@ fn driver_family(ep: &Endpoint) -> &'static str {
 fn complementary(render_desc: &str, capture_desc: &str) -> bool {
     let r = render_desc.to_ascii_uppercase();
     let c = capture_desc.to_ascii_uppercase();
-    let render_in = r.contains("INPUT") || r.contains("IN ") || r.contains("输入") || r.contains("SPEAKER");
+    let render_in =
+        r.contains("INPUT") || r.contains("IN ") || r.contains("输入") || r.contains("SPEAKER");
     let capture_out = c.contains("OUTPUT")
         || c.contains("OUT")
         || c.contains("输出")

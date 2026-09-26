@@ -11,7 +11,7 @@
 - `src/audio/render.rs`
   - render 线程同时消费进程、物理麦、音效三条 SPSC ring。
   - 三路先乘各自音量，再统一 clamp，最后乘 master 音量。
-- `docs/rust-architecture.md`
+- `docs/step-02-rust-architecture.md`
   - 同步常驻输出、动态源与三条 ring 的事实。
 
 怎么跑：

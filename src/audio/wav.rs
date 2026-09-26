@@ -17,8 +17,8 @@ pub struct WavData {
     pub samples: Vec<f32>,
 }
 
-/// 只读取 WAV 头部，导入前验证格式而不加载长音频样本。
-pub fn probe_wav(path: &Path) -> Result<(u32, u16), Error> {
+/// 只读取 WAV 头部，导入前验证格式并计算时长，不加载长音频样本。
+pub fn probe_wav(path: &Path) -> Result<(u32, u16, u64), Error> {
     let mut file = File::open(path)?;
     let mut header = [0u8; 12];
     file.read_exact(&mut header)?;
@@ -26,27 +26,58 @@ pub fn probe_wav(path: &Path) -> Result<(u32, u16), Error> {
         return Err(Error::Format("not a RIFF/WAVE file"));
     }
     let mut format = None;
-    let mut has_data = false;
+    let mut data_bytes = None;
     loop {
         let mut chunk = [0u8; 8];
-        if file.read_exact(&mut chunk).is_err() { break; }
+        if file.read_exact(&mut chunk).is_err() {
+            break;
+        }
         let size = u32::from_le_bytes(chunk[4..8].try_into().unwrap_or([0; 4])) as u64;
         if &chunk[0..4] == b"fmt " {
             let mut body = vec![0u8; size.min(40) as usize];
             file.read_exact(&mut body)?;
-            if body.len() >= 16 { format = Some((u16::from_le_bytes([body[0], body[1]]), u16::from_le_bytes([body[2], body[3]]), u32::from_le_bytes(body[4..8].try_into().unwrap_or([0; 4])), u16::from_le_bytes(body[14..16].try_into().unwrap_or([0; 2])))); }
-            if size > body.len() as u64 { file.seek(SeekFrom::Current((size - body.len() as u64) as i64))?; }
+            if body.len() >= 16 {
+                format = Some((
+                    u16::from_le_bytes([body[0], body[1]]),
+                    u16::from_le_bytes([body[2], body[3]]),
+                    u32::from_le_bytes(body[4..8].try_into().unwrap_or([0; 4])),
+                    u16::from_le_bytes(body[14..16].try_into().unwrap_or([0; 2])),
+                ));
+            }
+            if size > body.len() as u64 {
+                file.seek(SeekFrom::Current((size - body.len() as u64) as i64))?;
+            }
         } else {
-            if &chunk[0..4] == b"data" { has_data = size > 0; }
+            if &chunk[0..4] == b"data" {
+                data_bytes = Some(size);
+            }
             file.seek(SeekFrom::Current(size as i64))?;
         }
-        if size & 1 != 0 { file.seek(SeekFrom::Current(1))?; }
-        if format.is_some() && has_data { break; }
+        if size & 1 != 0 {
+            file.seek(SeekFrom::Current(1))?;
+        }
+        if format.is_some() && data_bytes.is_some() {
+            break;
+        }
     }
-    let Some((tag, channels, rate, bits)) = format else { return Err(Error::Format("WAV fmt missing")); };
-    if !has_data { return Err(Error::Format("WAV data missing")); }
-    if channels == 0 || rate == 0 || !((tag == 1 && matches!(bits, 8 | 16 | 24 | 32)) || (tag == 3 && bits == 32)) { return Err(Error::Format("unsupported WAV format")); }
-    Ok((rate, channels))
+    let Some((tag, channels, rate, bits)) = format else {
+        return Err(Error::Format("WAV fmt missing"));
+    };
+    let Some(data_bytes) = data_bytes else {
+        return Err(Error::Format("WAV data missing"));
+    };
+    if channels == 0
+        || rate == 0
+        || !((tag == 1 && matches!(bits, 8 | 16 | 24 | 32)) || (tag == 3 && bits == 32))
+    {
+        return Err(Error::Format("unsupported WAV format"));
+    }
+    let frame_bytes = u64::from(channels) * u64::from(bits / 8);
+    if frame_bytes == 0 || data_bytes < frame_bytes {
+        return Err(Error::Format("empty WAV"));
+    }
+    let duration_hns = data_bytes / frame_bytes * 10_000_000 / u64::from(rate);
+    Ok((rate, channels, duration_hns))
 }
 
 /// 读取 PCM/IEEE float WAV。只接受 RIFF/WAVE，未知 chunk 会跳过。

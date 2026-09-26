@@ -84,7 +84,9 @@ export component SettingsPage inherits Rectangle {
                 VerticalLayout {
                     for name[index] in root.devices: CheckBox {
                         text: name;
-                        checked: index < root.device-selected.length ? root.device-selected[index] : false;
+                        checked: index < root.device-selected.length
+                            ? root.device-selected[index]
+                            : false;
                         enabled: !root.running;
                         toggled => { root.device-toggled(index, self.checked); }
                     }
@@ -102,8 +104,18 @@ export component SettingsPage inherits Rectangle {
                     enabled: !root.running;
                     toggled => { root.set-default-mic-toggled(self.checked); }
                 }
-                CheckBox { text: "设为系统默认播放设备"; checked <=> root.set-default-render; enabled: !root.running; toggled => { root.set-default-render-toggled(self.checked); } }
-                CheckBox { text: "设为默认通信播放设备"; checked <=> root.set-default-communications; enabled: !root.running; toggled => { root.set-default-communications-toggled(self.checked); } }
+                CheckBox {
+                    text: "设为系统默认播放设备";
+                    checked <=> root.set-default-render;
+                    enabled: !root.running;
+                    toggled => { root.set-default-render-toggled(self.checked); }
+                }
+                CheckBox {
+                    text: "设为默认通信播放设备";
+                    checked <=> root.set-default-communications;
+                    enabled: !root.running;
+                    toggled => { root.set-default-communications-toggled(self.checked); }
+                }
                 Text {
                     text: root.dest-hint;
                     color: Theme.text2;
@@ -162,7 +174,12 @@ export component SettingsPage inherits Rectangle {
                         enabled: !root.running;
                         selected(_) => { root.playback-key-mode-toggled(root.playback-key-mode); }
                     }
-                    Text { text: root.playback-key-label; color: Theme.text2; font-size: 12px; vertical-alignment: TextVerticalAlignment.center; }
+                    Text {
+                        text: root.playback-key-label;
+                        color: Theme.text2;
+                        font-size: 12px;
+                        vertical-alignment: TextVerticalAlignment.center;
+                    }
                 }
                 Text {
                     text: "全局生效：双击音频后按一次或保持按下，用于游戏 PTT。默认不按键；启用输入模拟时需注意反作弊与权限风险。";
@@ -173,10 +190,30 @@ export component SettingsPage inherits Rectangle {
             }
 
             Card {
-                Text { text: "本地预览"; color: Theme.text2; font-size: 12px; font-weight: 600; }
-                CheckBox { text: "播放音频时同时在本机预览"; checked <=> root.preview-enabled; enabled: !root.running; toggled => { root.preview-enabled-toggled(self.checked); } }
-                SliderRow { label: "预览音量"; value <=> root.preview-volume; enabled: root.preview-enabled; edited(v) => { root.preview-volume-edited(v); } }
-                Text { text: "预览声音只送到本机默认播放设备，不进入虚拟麦克风；默认关闭。"; color: Theme.text3; font-size: 12px; wrap: word-wrap; }
+                Text {
+                    text: "本地预览";
+                    color: Theme.text2;
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+                CheckBox {
+                    text: "播放音频时同时在本机预览";
+                    checked <=> root.preview-enabled;
+                    enabled: !root.running;
+                    toggled => { root.preview-enabled-toggled(self.checked); }
+                }
+                SliderRow {
+                    label: "预览音量";
+                    value <=> root.preview-volume;
+                    enabled: root.preview-enabled;
+                    edited(v) => { root.preview-volume-edited(v); }
+                }
+                Text {
+                    text: "预览声音只送到本机默认播放设备，不进入虚拟麦克风；默认关闭。";
+                    color: Theme.text3;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
             }
             Card {
                 Text {

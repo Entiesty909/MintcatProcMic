@@ -10,17 +10,17 @@ use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
     AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
     AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, IAudioCaptureClient, IAudioClient,
-    IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX, WAVE_FORMAT_PCM,
+    IMMDeviceEnumerator, MMDeviceEnumerator, WAVE_FORMAT_PCM, WAVEFORMATEX,
 };
 use windows::Win32::Media::Audio::{
     AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
     AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, ActivateAudioInterfaceAsync,
     IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
-    IActivateAudioInterfaceCompletionHandler_Impl, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
-    VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+    IActivateAudioInterfaceCompletionHandler_Impl,
+    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
 };
-use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, CoTaskMemFree};
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, CoTaskMemFree};
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 use windows::Win32::System::Variant::VT_BLOB;
 use windows::core::{IUnknown, Interface, PCWSTR, Result as WinResult, implement};
@@ -153,7 +153,6 @@ pub fn activate_process_loopback(pid: u32) -> Result<IAudioClient, Error> {
             &params as *const AUDIOCLIENT_ACTIVATION_PARAMS as *mut u8,
         );
 
-
         // 必须持有 IActivateAudioInterfaceAsyncOperation 直到 Wait 返回，否则激活会被取消。
         let async_op = ActivateAudioInterfaceAsync(
             VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
@@ -221,7 +220,9 @@ fn sanitize_wave(fmt: &WAVEFORMATEX) -> WAVEFORMATEX {
         fmt.wBitsPerSample
     };
     let is_float = fmt.wFormatTag == 3
-        || bits == 32 && fmt.nBlockAlign == channels * 4 && fmt.wFormatTag != WAVE_FORMAT_PCM as u16;
+        || bits == 32
+            && fmt.nBlockAlign == channels * 4
+            && fmt.wFormatTag != WAVE_FORMAT_PCM as u16;
     if is_float {
         float_wave(rate, channels)
     } else {
@@ -454,7 +455,12 @@ pub fn run_capture_loop(
             } else {
                 unsafe { std::slice::from_raw_parts(data, nbytes) }
             };
-            converter.convert(bytes, frames as usize, silent || data.is_null(), &mut converted);
+            converter.convert(
+                bytes,
+                frames as usize,
+                silent || data.is_null(),
+                &mut converted,
+            );
             super::peak::hold_peak(&peak, &converted);
             ring.push_latest(&converted);
             if let Err(e) = unsafe { capture.ReleaseBuffer(frames) } {
@@ -538,7 +544,12 @@ pub fn capture_process_to_wav(pid: u32, path: &Path, seconds: f32) -> Result<(),
             } else {
                 unsafe { std::slice::from_raw_parts(data, nbytes) }
             };
-            converter.convert(bytes, frames as usize, silent || data.is_null(), &mut converted);
+            converter.convert(
+                bytes,
+                frames as usize,
+                silent || data.is_null(),
+                &mut converted,
+            );
             collected.extend_from_slice(&converted);
             unsafe { capture.capture.ReleaseBuffer(frames)? };
         }

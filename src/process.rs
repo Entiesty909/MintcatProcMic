@@ -13,7 +13,7 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GWL_EXSTYLE, GW_OWNER, GetWindow, GetWindowLongW, GetWindowTextW,
+    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetWindow, GetWindowLongW, GetWindowTextW,
     GetWindowThreadProcessId, IsWindowVisible, WS_EX_TOOLWINDOW,
 };
 use windows::core::Interface;

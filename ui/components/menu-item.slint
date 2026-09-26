@@ -1,0 +1,38 @@
+//! 右键菜单项：高 30px，悬停高亮，危险项红色。
+
+import { Theme } from "../theme.slint";
+
+export component MenuItem inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> enabled: true;
+    in property <bool> danger: false;
+    callback clicked();
+
+    height: 30px;
+    border-radius: 0px;
+    opacity: root.enabled ? 1.0 : 0.45;
+    background: transparent;
+
+    Text {
+        text: root.label;
+        x: 12px;
+        color: root.danger ? Theme.danger : Theme.text;
+        font-size: 13px;
+        vertical-alignment: TextVerticalAlignment.center;
+    }
+
+    area := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    states [
+        hovered when area.has-hover && root.enabled: {
+            background: Theme.accentSoft;
+        }
+        pressed when area.pressed && root.enabled: {
+            background: #CCE4F7;
+        }
+    ]
+}

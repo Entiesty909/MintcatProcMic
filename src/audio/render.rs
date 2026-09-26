@@ -1,8 +1,8 @@
 //! WASAPI 共享模式渲染：从 ring 取 f32，写到用户选的设备。
 
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Media::Audio::{
@@ -16,7 +16,7 @@ use crate::error::Error;
 
 use super::buffer::SpscRing;
 use super::com;
-use super::format::{encode_from_f32, AudioFormat, SampleKind};
+use super::format::{AudioFormat, SampleKind, encode_from_f32};
 
 /// 已 Initialize 的渲染客户端，由渲染线程独占。
 pub struct RenderClient {
@@ -155,12 +155,16 @@ pub fn run_render_loop(
         let vol = f32::from_bits(volume.load(Ordering::Relaxed)).clamp(0.0, 1.0);
         let mic_vol = f32::from_bits(mic_volume.load(Ordering::Relaxed)).clamp(0.0, 1.0);
         let sfx_vol = f32::from_bits(sfx_volume.load(Ordering::Relaxed)).clamp(0.0, 1.0);
-        if tmp.len() < samples { tmp.resize(samples, 0.0); }
+        if tmp.len() < samples {
+            tmp.resize(samples, 0.0);
+        }
         tmp[..samples].fill(0.0);
         for process_ring in &process_rings {
             let n = process_ring.pop(&mut mic_tmp[..samples]);
             mic_tmp[n..samples].fill(0.0);
-            for i in 0..samples { tmp[i] += mic_tmp[i] * vol; }
+            for i in 0..samples {
+                tmp[i] += mic_tmp[i] * vol;
+            }
         }
         if let Some(mic) = &mic_ring {
             if mic_tmp.len() < samples {

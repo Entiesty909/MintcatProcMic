@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, ERROR_ALREADY_EXISTS};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, HANDLE};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::core::w;
 
@@ -19,7 +19,10 @@ pub struct Hotkey {
 
 impl Default for Hotkey {
     fn default() -> Self {
-        Self { mods: 0x0002 | 0x0004, vk: 0x77 }
+        Self {
+            mods: 0x0002 | 0x0004,
+            vk: 0x77,
+        }
     }
 }
 
@@ -27,9 +30,15 @@ impl Hotkey {
     /// 给 UI 看的标签。
     pub fn label(self) -> String {
         let mut parts = Vec::new();
-        if self.mods & 2 != 0 { parts.push("Ctrl"); }
-        if self.mods & 4 != 0 { parts.push("Shift"); }
-        if self.mods & 1 != 0 { parts.push("Alt"); }
+        if self.mods & 2 != 0 {
+            parts.push("Ctrl");
+        }
+        if self.mods & 4 != 0 {
+            parts.push("Shift");
+        }
+        if self.mods & 1 != 0 {
+            parts.push("Alt");
+        }
         parts.push(vk_name(self.vk));
         parts.join("+")
     }
@@ -48,7 +57,13 @@ pub struct Hotkeys {
 }
 
 impl Default for Hotkeys {
-    fn default() -> Self { Self { toggle_route: Hotkey::default(), stop_all: None, mode: HotkeyModeConfig::System } }
+    fn default() -> Self {
+        Self {
+            toggle_route: Hotkey::default(),
+            stop_all: None,
+            mode: HotkeyModeConfig::System,
+        }
+    }
 }
 
 /// 配置文件中的热键模式。
@@ -114,7 +129,14 @@ pub struct MixConfig {
 }
 
 impl Default for MixConfig {
-    fn default() -> Self { Self { process: 1.0, mic: 1.0, sfx: 1.0, master: 1.0 } }
+    fn default() -> Self {
+        Self {
+            process: 1.0,
+            mic: 1.0,
+            sfx: 1.0,
+            master: 1.0,
+        }
+    }
 }
 
 /// 声板播放模式。
@@ -162,9 +184,12 @@ pub struct AudioEntry {
     pub name: String,
     /// 文件路径。
     pub path: String,
-    /// 所属分类。
+    /// 所属分类路径；使用 `/` 分隔父分类和子分类。
     #[serde(default = "default_category")]
     pub category: String,
+    /// 文件时长，100 ns 为单位；旧配置为 0，启动时补全。
+    #[serde(default)]
+    pub duration_hns: u64,
     /// 是否循环。
     #[serde(default)]
     pub loop_playback: bool,
@@ -173,8 +198,12 @@ pub struct AudioEntry {
     pub hotkey: Option<Hotkey>,
 }
 
-fn default_category() -> String { "未分类".into() }
-fn default_preview_volume() -> f32 { 0.5 }
+fn default_category() -> String {
+    "未分类".into()
+}
+fn default_preview_volume() -> f32 {
+    0.5
+}
 
 /// 兼容旧版本的声板条目；音频库新条目使用 `AudioEntry`。
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -261,17 +290,25 @@ impl Default for AppConfig {
 }
 
 /// 单实例互斥体。句柄存活期间保持应用独占。
-pub struct SingleInstance { handle: HANDLE }
+pub struct SingleInstance {
+    handle: HANDLE,
+}
 
 impl Drop for SingleInstance {
-    fn drop(&mut self) { unsafe { let _ = CloseHandle(self.handle); } }
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.handle);
+        }
+    }
 }
 
 /// 获取命名互斥体；返回 None 表示已有实例。
 pub fn acquire_single_instance() -> Result<Option<SingleInstance>, windows::core::Error> {
     let handle = unsafe { CreateMutexW(None, true, w!("Local\\ProcessMic.SingleInstance"))? };
     if unsafe { windows::Win32::Foundation::GetLastError() } == ERROR_ALREADY_EXISTS {
-        unsafe { let _ = CloseHandle(handle); }
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
         return Ok(None);
     }
     Ok(Some(SingleInstance { handle }))
@@ -279,7 +316,9 @@ pub fn acquire_single_instance() -> Result<Option<SingleInstance>, windows::core
 
 /// 读配置。不存在、损坏或旧版本都回退默认并保留旧热键迁移。
 pub fn load() -> AppConfig {
-    let Ok(text) = fs::read_to_string(config_path()) else { return AppConfig::default(); };
+    let Ok(text) = fs::read_to_string(config_path()) else {
+        return AppConfig::default();
+    };
     if let Ok(mut config) = serde_json::from_str::<AppConfig>(&text) {
         config.version = 2;
         return config;
@@ -303,45 +342,80 @@ pub fn save(config: &AppConfig) {
         }
     }
     match serde_json::to_string_pretty(config) {
-        Ok(body) => if let Err(e) = fs::write(&path, format!("{body}\n")) {
-            tracing::warn!("save config: {e}");
-        },
+        Ok(body) => {
+            if let Err(e) = fs::write(&path, format!("{body}\n")) {
+                tracing::warn!("save config: {e}");
+            }
+        }
         Err(e) => tracing::warn!("serialize config: {e}"),
     }
 }
 
 #[derive(Deserialize)]
-struct LegacyHotkey { mods: u32, vk: u32 }
+struct LegacyHotkey {
+    mods: u32,
+    vk: u32,
+}
 
 impl From<LegacyHotkey> for Hotkey {
-    fn from(value: LegacyHotkey) -> Self { Self { mods: value.mods, vk: value.vk } }
+    fn from(value: LegacyHotkey) -> Self {
+        Self {
+            mods: value.mods,
+            vk: value.vk,
+        }
+    }
 }
 
 fn config_path() -> PathBuf {
-    let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
     base.join("ProcessMic").join("config.json")
 }
 
 fn vk_name(vk: u32) -> &'static str {
     match vk {
-        0x20 => "Space", 0x70 => "F1", 0x71 => "F2", 0x72 => "F3", 0x73 => "F4",
-        0x74 => "F5", 0x75 => "F6", 0x76 => "F7", 0x77 => "F8", 0x78 => "F9",
-        0x79 => "F10", 0x7A => "F11", 0x7B => "F12", _ => "Key",
+        0x20 => "Space",
+        0x70 => "F1",
+        0x71 => "F2",
+        0x72 => "F3",
+        0x73 => "F4",
+        0x74 => "F5",
+        0x75 => "F6",
+        0x76 => "F7",
+        0x77 => "F8",
+        0x78 => "F9",
+        0x79 => "F10",
+        0x7A => "F11",
+        0x7B => "F12",
+        _ => "Key",
     }
 }
 
 /// Slint 按键文本 → VK。
 pub fn slint_key_to_vk(text: &str) -> Option<u32> {
-    if text == " " || text.eq_ignore_ascii_case("space") { return Some(0x20); }
+    if text == " " || text.eq_ignore_ascii_case("space") {
+        return Some(0x20);
+    }
     if let Some(n) = text.strip_prefix('F').or_else(|| text.strip_prefix('f'))
-        && let Ok(i) = n.parse::<u32>() && (1..=12).contains(&i) { return Some(0x70 + i - 1); }
+        && let Ok(i) = n.parse::<u32>()
+        && (1..=12).contains(&i)
+    {
+        return Some(0x70 + i - 1);
+    }
     let mut ch = text.chars();
     let c = ch.next()?;
     if ch.next().is_some() {
         let v = c as u32;
-        if (0xF001..=0xF00C).contains(&v) { return Some(0x70 + (v - 0xF001)); }
+        if (0xF001..=0xF00C).contains(&v) {
+            return Some(0x70 + (v - 0xF001));
+        }
         return None;
     }
     let u = c.to_ascii_uppercase() as u32;
-    if (0x30..=0x39).contains(&u) || (0x41..=0x5A).contains(&u) { Some(u) } else { None }
+    if (0x30..=0x39).contains(&u) || (0x41..=0x5A).contains(&u) {
+        Some(u)
+    } else {
+        None
+    }
 }

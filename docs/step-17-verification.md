@@ -26,7 +26,7 @@ target\release\mintcat-proc-mic.exe --route <pid> --device <wasapi-id> --seconds
 - S1 UI：前序阶段成功启动；144 DPI 下已启用 Per-Monitor V2，卡片使用响应式等宽伸缩，进程长标题不改变父布局宽度。
 
 已同步：
-- `docs/rust-architecture.md`：常驻输出、三条 SPSC ring、动态源、SFX、响应式 UI、50 ms 状态轮询。
+- `docs/step-02-rust-architecture.md`：常驻输出、三条 SPSC ring、动态源、SFX、响应式 UI、50 ms 状态轮询。
 - `docs/step-11-ui-shell.md` 至 `docs/step-16-hotkey-safety.md`：每阶段改动、命令、实测与明确未完成边界。
 
 性能备注：

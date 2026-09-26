@@ -1,7 +1,14 @@
 //! Capture → Render 的 SPSC 环形缓冲。音频线程不分配。
 
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+
+/// 生产端退让时的轮询间隔：够短以跟上消费端，又不空转。
+const POLL: Duration = Duration::from_millis(2);
+/// 消费端停摆判定上限；超过则生产端改为丢最旧保实时。
+const STALL_LIMIT: Duration = Duration::from_millis(250);
 
 /// 单生产者单消费者 f32 交错采样环。
 ///
@@ -49,6 +56,22 @@ impl SpscRing {
     pub fn clear(&self) {
         let write = self.write.load(Ordering::Acquire);
         self.read.store(write, Ordering::Release);
+    }
+
+    /// 生产端按消费进度写入：环内积压超过 `lead` 时退让等待，让节拍由消费端决定。
+    ///
+    /// `lead` 是允许的积压上限（采样数），即生产端最多领先消费端这么多，避免
+    /// 写满后 `push_latest` 丢弃最旧数据导致消费端只听到被覆盖的一小段。
+    /// 消费端停摆超过 `STALL_LIMIT` 时不再等待，交回 `push_latest` 保实时。
+    pub fn push_paced(&self, src: &[f32], lead: usize, stop: &AtomicBool) {
+        let deadline = Instant::now() + STALL_LIMIT;
+        while self.len() + src.len() > lead && !stop.load(Ordering::Acquire) {
+            if Instant::now() >= deadline {
+                break;
+            }
+            thread::sleep(POLL);
+        }
+        self.push_latest(src);
     }
 
     /// 写入最新采样。空间不足时先丢最旧，保证实时路径不阻塞。

@@ -14,7 +14,7 @@
 - `src/engine.rs` / `src/audio/render.rs`：增加总音量原子值并在渲染末端应用。
 - `src/main.rs` / `Cargo.toml`：启用 Per-Monitor V2 DPI 感知。
 - `src/hotkey.rs`：删除两个未使用导入。
-- `docs/rust-architecture.md`：同步 UI 文件结构、轮询周期、三路音量事实。
+- `docs/step-02-rust-architecture.md`：同步 UI 文件结构、轮询周期、三路音量事实。
 
 怎么跑：
 ```bat

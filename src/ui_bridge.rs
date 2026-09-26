@@ -1,5 +1,6 @@
 //! Slint 桥：分页界面、列表填充、状态轮询、热键。
 
+use slint::{ModelRc, Timer, TimerMode, VecModel};
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -7,8 +8,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-
-use slint::{ModelRc, Timer, TimerMode, VecModel};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST, OPENFILENAMEW,
@@ -63,15 +62,35 @@ struct UiCache {
     /// 音频库条目。
     audio_entries: Vec<config::AudioEntry>,
     /// 当前分类。
+    /// 当前分类路径。
     audio_category: String,
     /// 最近一次音频点击，用于区分单击选择与双击播放。
     last_audio_click: Option<(usize, Instant)>,
+    /// 菜单播放不经过第二次伪造点击。
+    force_audio_play: bool,
     /// 搜索关键字。
     audio_search: String,
     /// 等待设置热键的音频可见下标。
     audio_hotkey_index: Option<usize>,
     /// 当前解码任务；切换音频时取消旧任务。
     audio_cancel: Option<Arc<AtomicBool>>,
+    /// 正在播放的条目；拖动进度条时按它重新起流。
+    audio_playing: Option<PlayingEntry>,
+    /// 播放起点：锚点时刻与对应的媒体位置（100 ns）。进度条以它换算，不再累加 tick。
+    audio_anchor: Option<(Instant, u64)>,
+}
+
+/// 正在播放的库条目。
+#[derive(Clone)]
+struct PlayingEntry {
+    /// 文件路径。
+    path: String,
+    /// 显示名。
+    name: String,
+    /// 是否循环。
+    looped: bool,
+    /// 媒体总时长，100 ns 为单位。
+    duration_hns: u64,
 }
 /// 创建窗口、填列表、跑事件循环。退出时还原默认麦并停引擎。
 pub fn run_ui() -> Result<(), Error> {
@@ -81,6 +100,9 @@ pub fn run_ui() -> Result<(), Error> {
     let ui = MainWindow::new().map_err(|e| Error::InvalidArgs(e.to_string()))?;
     let engine = Rc::new(AudioEngine::new());
     let app_config = Rc::new(RefCell::new(config::load()));
+    if hydrate_audio_durations(&app_config) {
+        config::save(&app_config.borrow());
+    }
     let persisted = app_config.borrow().clone();
     let cache = Rc::new(RefCell::new(UiCache {
         all_devices: persisted.output.all_devices,
@@ -165,7 +187,145 @@ pub fn run_ui() -> Result<(), Error> {
     Ok(())
 }
 
+/// 临时：把主窗口按音频库布局渲染成原始 RGBA，用于核对菜单与索引列。
+pub fn snapshot_to_file(path: &str, with_entry_menu: bool) -> Result<(), Error> {
+    let ui = MainWindow::new().map_err(|e| Error::InvalidArgs(e.to_string()))?;
+    let persisted = config::load();
+    let cache = Rc::new(RefCell::new(UiCache {
+        audio_categories: persisted.audio_categories.clone(),
+        audio_entries: persisted.audio_entries.clone(),
+        audio_category: "全部".into(),
+        ..UiCache::default()
+    }));
+    ui.set_page(1);
+    // 走真实列表填充路径，用本机配置里的音频条目。
+    update_audio_list(&ui, &cache);
+    ui.set_audio_entry_index(0);
+    ui.set_audio_current_name(slint::SharedString::from("豪大大鸡排原版"));
+    ui.set_audio_current_position(slint::SharedString::from("0:47 / 3:55"));
+    ui.set_player_playing(true);
+    ui.set_audio_progress(0.2);
+    if with_entry_menu {
+        ui.set_audio_entry_index(1);
+        ui.set_audio_entry_menu_x(420.0);
+        ui.set_audio_entry_menu_y(150.0);
+        ui.set_audio_entry_menu_open(true);
+    }
+    ui.window().set_size(slint::LogicalSize::new(1080.0, 560.0));
+    ui.window()
+        .show()
+        .map_err(|e| Error::InvalidArgs(e.to_string()))?;
+    // 软件渲染器按需渲染：先压一次事件循环，再取快照。
+    let _ = slint::invoke_from_event_loop(|| {});
+    let snapshot = ui
+        .window()
+        .take_snapshot()
+        .map_err(|e| Error::InvalidArgs(e.to_string()))?;
+    let mut bytes = Vec::with_capacity(8 + snapshot.as_bytes().len());
+    bytes.extend_from_slice(&snapshot.width().to_le_bytes());
+    bytes.extend_from_slice(&snapshot.height().to_le_bytes());
+    bytes.extend_from_slice(snapshot.as_bytes());
+    std::fs::write(path, &bytes)?;
+    println!(
+        "snapshot {}x{} -> {path}",
+        snapshot.width(),
+        snapshot.height()
+    );
+    Ok(())
+}
+
+/// 起一条播放流：从 `start_hns` 解码，同时喂给 SFX 混音与本机试听，并重置进度锚点。
+///
+/// 双击播放和拖动进度条共用它：先取消上一条解码，再按新位置重开，
+/// 所以两处对“换源”的处理完全一致。
+fn start_playback(
+    ui: &MainWindow,
+    engine: &Rc<AudioEngine>,
+    cache: &Rc<RefCell<UiCache>>,
+    preview: &Arc<Mutex<Option<crate::audio::preview::PreviewEngine>>>,
+    preview_volume: f32,
+    entry: &config::AudioEntry,
+    start_hns: u64,
+) {
+    let cancel = Arc::new(AtomicBool::new(false));
+    if let Some(old) = cache.borrow_mut().audio_cancel.replace(cancel.clone()) {
+        old.store(true, Ordering::Release);
+    }
+    {
+        let mut c = cache.borrow_mut();
+        c.audio_playing = Some(PlayingEntry {
+            path: entry.path.clone(),
+            name: entry.name.clone(),
+            looped: entry.loop_playback,
+            duration_hns: entry.duration_hns,
+        });
+        c.audio_anchor = Some((Instant::now(), start_hns));
+    }
+
+    let sender = engine.sfx_sender().ok();
+    let preview = preview.clone();
+    let ui_weak = ui.as_weak();
+    let name = entry.name.clone();
+    let looped = entry.loop_playback;
+    let path = PathBuf::from(&entry.path);
+    thread::spawn(move || {
+        // 转发没开时 SFX 那边是关闭的，只用试听这条，省一次解码。
+        let sfx_stream = sender.as_ref().and_then(|_| {
+            crate::audio::decode::stream_to_channel(path.clone(), start_hns, looped, cancel.clone())
+                .ok()
+        });
+        match crate::audio::decode::stream_to_channel(path, start_hns, looped, cancel) {
+            Ok((info, preview_rx)) => {
+                if let (Some(sender), Some((sfx_info, rx))) = (sender, sfx_stream) {
+                    let _ = sender.send(crate::audio::sfx::SfxCommand::PlayStream {
+                        sample_rate: sfx_info.sample_rate,
+                        channels: sfx_info.channels,
+                        mode: if looped {
+                            crate::audio::sfx::SfxMode::Loop
+                        } else {
+                            crate::audio::sfx::SfxMode::Once
+                        },
+                        volume: 1.0,
+                        rx,
+                    });
+                }
+                if let Ok(mut guard) = preview.lock() {
+                    if guard.is_none() {
+                        *guard = crate::audio::preview::PreviewEngine::open_default().ok();
+                        if let Some(p) = guard.as_ref() {
+                            p.set_volume(preview_volume);
+                        }
+                    }
+                    if let Some(p) = guard.as_ref() {
+                        p.play_stream(info, preview_rx, looped);
+                    }
+                }
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_audio_current_name(name.into());
+                        ui.set_audio_duration_seconds(info.duration_hns as f32 / 10_000_000.0);
+                        ui.set_player_playing(true);
+                        ui.set_error_text("".into());
+                    }
+                });
+            }
+            Err(error) => {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_audio_progress(0.0);
+                        ui.set_audio_duration_seconds(0.0);
+                        ui.set_audio_current_position("".into());
+                        ui.set_player_playing(false);
+                        ui.set_error_text(error.user_message().into());
+                    }
+                });
+            }
+        }
+    });
+}
+
 /// 把窗口尺寸按逻辑像素收窄到显示器工作区内。
+///
 /// 高 DPI 小屏如果直接使用默认尺寸，底部状态栏会落到屏幕外。
 fn fit_window_to_screen(ui: &MainWindow) {
     let scale = ui.window().scale_factor().max(1.0);
@@ -365,11 +525,53 @@ fn wire_callbacks(
         });
     }
     {
-        let ui_weak = ui.as_weak(); let hotkey = hotkey.clone(); let server = hotkey_server.clone(); let app_config = app_config.clone(); let cache = cache.clone();
+        let ui_weak = ui.as_weak();
+        let hotkey = hotkey.clone();
+        let server = hotkey_server.clone();
+        let app_config = app_config.clone();
+        let cache = cache.clone();
         ui.on_hotkey_captured(move |text, ctrl, shift, alt| {
-            let Some(ui) = ui_weak.upgrade() else { return; }; ui.set_listening_hotkey(false);
-            let Some(vk) = config::slint_key_to_vk(text.as_str()) else { return; }; let mut mods = 0u32; if alt { mods |= 1; } if ctrl { mods |= 2; } if shift { mods |= 4; } let hk = config::Hotkey { mods, vk };
-            if let Some(index) = cache.borrow_mut().audio_hotkey_index.take() { let category = cache.borrow().audio_category.clone(); let search = cache.borrow().audio_search.to_ascii_lowercase(); let mut cfg = app_config.borrow_mut(); if let Some(entry) = cfg.audio_entries.iter_mut().filter(|e| category == "全部" || e.category == category).filter(|e| search.is_empty() || e.name.to_ascii_lowercase().contains(&search)).nth(index) { entry.hotkey = Some(hk); } config::save(&cfg); ui.set_error_text(format!("音频热键已设置：{}", hk.label()).into()); } else { *hotkey.borrow_mut() = hk; server.set(hk); let mut cfg = app_config.borrow_mut(); cfg.hotkeys.toggle_route = hk; config::save(&cfg); ui.set_hotkey_label(hk.label().into()); }
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            ui.set_listening_hotkey(false);
+            let Some(vk) = config::slint_key_to_vk(text.as_str()) else {
+                return;
+            };
+            let mut mods = 0u32;
+            if alt {
+                mods |= 1;
+            }
+            if ctrl {
+                mods |= 2;
+            }
+            if shift {
+                mods |= 4;
+            }
+            let hk = config::Hotkey { mods, vk };
+            if let Some(index) = cache.borrow_mut().audio_hotkey_index.take() {
+                let category = cache.borrow().audio_category.clone();
+                let search = cache.borrow().audio_search.to_ascii_lowercase();
+                let mut cfg = app_config.borrow_mut();
+                if let Some(entry) = cfg
+                    .audio_entries
+                    .iter_mut()
+                    .filter(|e| category_matches(e, &category))
+                    .filter(|e| search.is_empty() || e.name.to_ascii_lowercase().contains(&search))
+                    .nth(index)
+                {
+                    entry.hotkey = Some(hk);
+                }
+                config::save(&cfg);
+                ui.set_error_text(format!("音频热键已设置：{}", hk.label()).into());
+            } else {
+                *hotkey.borrow_mut() = hk;
+                server.set(hk);
+                let mut cfg = app_config.borrow_mut();
+                cfg.hotkeys.toggle_route = hk;
+                config::save(&cfg);
+                ui.set_hotkey_label(hk.label().into());
+            }
         });
     }
     {
@@ -462,18 +664,28 @@ fn wire_callbacks(
             let Some(path) = select_audio_file() else {
                 return;
             };
-            if let Err(error) = crate::audio::decode::validate_file(&path) {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_error_text(error.user_message().into());
+            let validate_info = match crate::audio::decode::validate_file(&path) {
+                Ok(info) => info,
+                Err(error) => {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_error_text(error.user_message().into());
+                    }
+                    return;
                 }
-                return;
-            }
+            };
             let name = path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("音频")
                 .to_string();
-            let entry = config::AudioEntry { name, path: path.to_string_lossy().into_owned(), category: "未分类".into(), loop_playback: false, hotkey: None };
+            let entry = config::AudioEntry {
+                name,
+                path: path.to_string_lossy().into_owned(),
+                category: "未分类".into(),
+                duration_hns: validate_info.duration_hns,
+                loop_playback: false,
+                hotkey: None,
+            };
             cache.borrow_mut().audio_entries.push(entry);
             let entries = cache.borrow().audio_entries.clone();
             app_config.borrow_mut().audio_entries = entries;
@@ -488,9 +700,8 @@ fn wire_callbacks(
         let ui_weak = ui.as_weak();
         let cache = cache.clone();
         ui.on_audio_category_changed(move |index| {
-            let categories = audio_categories(&cache);
-            if let Some(category) = categories.get(index as usize) {
-                cache.borrow_mut().audio_category = category.to_string();
+            if let Some(category) = category_paths(&cache).get(index as usize).cloned() {
+                cache.borrow_mut().audio_category = category;
             }
             if let Some(ui) = ui_weak.upgrade() {
                 update_audio_list(&ui, &cache);
@@ -501,16 +712,15 @@ fn wire_callbacks(
         let ui_weak = ui.as_weak();
         let cache = cache.clone();
         ui.on_audio_category_context(move |index| {
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_audio_category_index(index);
-                ui.set_audio_category_menu_open(true);
-            }
-            let categories = audio_categories(&cache);
-            if let Some(category) = categories.get(index as usize) {
-                cache.borrow_mut().audio_category = category.to_string();
-            }
-            if let Some(ui) = ui_weak.upgrade() {
-                update_audio_list(&ui, &cache);
+            let path = category_paths(&cache).get(index as usize).cloned();
+            if let Some(path) = path {
+                cache.borrow_mut().audio_category = path.clone();
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_audio_category_index(index);
+                    ui.set_audio_category_edit_name(category_leaf(&path).into());
+                    ui.set_audio_category_menu_open(true);
+                    update_audio_list(&ui, &cache);
+                }
             }
         });
     }
@@ -519,13 +729,22 @@ fn wire_callbacks(
         let cache = cache.clone();
         let app_config = app_config.clone();
         ui.on_audio_category_new(move || {
-            let categories = {
+            let (categories, new_path) = {
+                let paths = category_paths(&cache);
+                let selected = cache.borrow().audio_category.clone();
+                let base = (selected != "全部" && selected != "未分类").then_some(selected);
+                let prefix = base.map(|path| format!("{path}/"));
+                let mut number = 1;
+                let new_path = loop {
+                    let candidate = format!("{}新分类 {number}", prefix.as_deref().unwrap_or(""));
+                    if !paths.contains(&candidate) {
+                        break candidate;
+                    }
+                    number += 1;
+                };
                 let mut c = cache.borrow_mut();
-                let name = format!("新分类 {}", c.audio_categories.len() + 1);
-                if !c.audio_categories.contains(&name) {
-                    c.audio_categories.push(name);
-                }
-                c.audio_categories.clone()
+                c.audio_categories.push(new_path.clone());
+                (c.audio_categories.clone(), new_path)
             };
             {
                 let mut cfg = app_config.borrow_mut();
@@ -534,6 +753,14 @@ fn wire_callbacks(
             }
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_audio_categories(ModelRc::new(VecModel::from(audio_categories(&cache))));
+                if let Some(index) = category_paths(&cache)
+                    .iter()
+                    .position(|path| path == &new_path)
+                {
+                    ui.set_audio_category_index(index as i32);
+                    cache.borrow_mut().audio_category = new_path;
+                }
+                update_audio_list(&ui, &cache);
             }
         });
     }
@@ -546,34 +773,40 @@ fn wire_callbacks(
                 return;
             };
             let index = ui.get_audio_category_index() as usize;
-            let name = ui.get_audio_category_edit_name().trim().to_string();
-            if index < 2 || name.is_empty() {
-                return;
-            }
-            let old = audio_categories(&cache).get(index).map(|s| s.to_string());
-            let Some(old) = old else {
+            let Some(old) = category_paths(&cache).get(index).cloned() else {
                 return;
             };
+            if index < 2 {
+                return;
+            }
+            let leaf = ui.get_audio_category_edit_name().trim().replace('/', "／");
+            if leaf.is_empty() {
+                return;
+            }
+            let new_path = old
+                .rsplit_once('/')
+                .map(|(parent, _)| format!("{parent}/{leaf}"))
+                .unwrap_or(leaf);
             let (categories, entries) = {
                 let mut c = cache.borrow_mut();
                 for cat in &mut c.audio_categories {
-                    if *cat == old {
-                        *cat = name.clone();
+                    if *cat == old || cat.starts_with(&format!("{old}/")) {
+                        *cat = format!("{new_path}{}", &cat[old.len()..]);
                     }
                 }
                 for entry in &mut c.audio_entries {
-                    if entry.category == old {
-                        entry.category = name.clone();
+                    if entry.category == old || entry.category.starts_with(&format!("{old}/")) {
+                        entry.category = format!("{new_path}{}", &entry.category[old.len()..]);
                     }
                 }
                 (c.audio_categories.clone(), c.audio_entries.clone())
             };
-            {
-                let mut cfg = app_config.borrow_mut();
-                cfg.audio_categories = categories;
-                cfg.audio_entries = entries;
-                config::save(&cfg);
-            }
+            let mut cfg = app_config.borrow_mut();
+            cfg.audio_categories = categories;
+            cfg.audio_entries = entries;
+            config::save(&cfg);
+            drop(cfg);
+            cache.borrow_mut().audio_category = new_path;
             ui.set_audio_categories(ModelRc::new(VecModel::from(audio_categories(&cache))));
             update_audio_list(&ui, &cache);
         });
@@ -587,29 +820,30 @@ fn wire_callbacks(
                 return;
             };
             let index = ui.get_audio_category_index() as usize;
+            let Some(name) = category_paths(&cache).get(index).cloned() else {
+                return;
+            };
             if index < 2 {
                 return;
             }
-            let name = audio_categories(&cache).get(index).map(|s| s.to_string());
-            let Some(name) = name else {
-                return;
-            };
+            let prefix = format!("{name}/");
             let (categories, entries) = {
                 let mut c = cache.borrow_mut();
-                c.audio_categories.retain(|v| v != &name);
+                c.audio_categories
+                    .retain(|v| v != &name && !v.starts_with(&prefix));
                 for entry in &mut c.audio_entries {
-                    if entry.category == name {
+                    if entry.category == name || entry.category.starts_with(&prefix) {
                         entry.category = "未分类".into();
                     }
                 }
+                c.audio_category = "全部".into();
                 (c.audio_categories.clone(), c.audio_entries.clone())
             };
-            {
-                let mut cfg = app_config.borrow_mut();
-                cfg.audio_categories = categories;
-                cfg.audio_entries = entries;
-                config::save(&cfg);
-            }
+            let mut cfg = app_config.borrow_mut();
+            cfg.audio_categories = categories;
+            cfg.audio_entries = entries;
+            config::save(&cfg);
+            drop(cfg);
             ui.set_audio_category_index(0);
             ui.set_audio_category_edit_name("".into());
             ui.set_audio_category_menu_open(false);
@@ -628,45 +862,192 @@ fn wire_callbacks(
         });
     }
     {
-        let ui_weak = ui.as_weak(); let cache = cache.clone();
-        ui.on_audio_entry_context(move |index| { if let Some(ui) = ui_weak.upgrade() { ui.set_audio_entry_index(index); ui.set_audio_entry_menu_open(true); } cache.borrow_mut().last_audio_click = None; });
-    }
-    {
-        let ui_weak = ui.as_weak(); let cache = cache.clone(); let app_config = app_config.clone();
-        ui.on_audio_entry_remove(move || {
-            let Some(ui) = ui_weak.upgrade() else { return; }; let visible = ui.get_audio_entry_index() as usize;
-            let (category, search) = { let c = cache.borrow(); (c.audio_category.clone(), c.audio_search.to_ascii_lowercase()) };
-            let mut c = cache.borrow_mut(); let actual = c.audio_entries.iter().enumerate().filter(|(_, e)| (category == "全部" || e.category == category) && (search.is_empty() || e.name.to_ascii_lowercase().contains(&search))).nth(visible).map(|(i, _)| i);
-            if let Some(actual) = actual { c.audio_entries.remove(actual); let entries = c.audio_entries.clone(); drop(c); app_config.borrow_mut().audio_entries = entries; config::save(&app_config.borrow()); update_audio_list(&ui, &cache); }
+        let ui_weak = ui.as_weak();
+        let cache = cache.clone();
+        ui.on_audio_entry_context(move |index| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            ui.set_audio_entry_index(index);
+            ui.set_audio_category_menu_open(false);
+            cache.borrow_mut().last_audio_click = None;
         });
     }
     {
-        let ui_weak = ui.as_weak(); let cache = cache.clone();
-        ui.on_audio_entry_explorer_rename(move || { let Some(ui) = ui_weak.upgrade() else { return; }; let index = ui.get_audio_entry_index() as usize; let c = cache.borrow(); let category = c.audio_category.clone(); let search = c.audio_search.to_ascii_lowercase(); if let Some(entry) = c.audio_entries.iter().filter(|e| (category == "全部" || e.category == category) && (search.is_empty() || e.name.to_ascii_lowercase().contains(&search))).nth(index) { let _ = std::process::Command::new("explorer.exe").args(["/select,", &entry.path]).spawn(); } });
-    }
-    {
-        let ui_weak = ui.as_weak(); let cache = cache.clone();
-        ui.on_audio_entry_edit_file(move || { let Some(ui) = ui_weak.upgrade() else { return; }; let index = ui.get_audio_entry_index() as usize; let c = cache.borrow(); let category = c.audio_category.clone(); let search = c.audio_search.to_ascii_lowercase(); if let Some(entry) = c.audio_entries.iter().filter(|e| (category == "全部" || e.category == category) && (search.is_empty() || e.name.to_ascii_lowercase().contains(&search))).nth(index) { let _ = std::process::Command::new("explorer.exe").arg(&entry.path).spawn(); } });
-    }
-    {
-        let ui_weak = ui.as_weak(); let cache = cache.clone();
-        ui.on_audio_entry_hotkey(move || { let Some(ui) = ui_weak.upgrade() else { return; }; cache.borrow_mut().audio_hotkey_index = Some(ui.get_audio_entry_index() as usize); ui.set_listening_hotkey(true); ui.set_error_text("请按下音频热键".into()); });
-    }
-    {
-        let ui_weak = ui.as_weak(); let cache = cache.clone(); let app_config = app_config.clone();
-        ui.on_audio_entry_remove_hotkey(move || { let Some(ui) = ui_weak.upgrade() else { return; }; let visible = ui.get_audio_entry_index() as usize; let (category, search) = { let c = cache.borrow(); (c.audio_category.clone(), c.audio_search.to_ascii_lowercase()) }; let mut cfg = app_config.borrow_mut(); if let Some(entry) = cfg.audio_entries.iter_mut().filter(|e| (category == "全部" || e.category == category) && (search.is_empty() || e.name.to_ascii_lowercase().contains(&search))).nth(visible) { entry.hotkey = None; } config::save(&cfg); ui.set_error_text("音频热键已移除".into()); });
+        let ui_weak = ui.as_weak();
+        let cache = cache.clone();
+        let app_config = app_config.clone();
+        ui.on_audio_entry_remove(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let visible = ui.get_audio_entry_index().max(0) as usize;
+            let (category, search) = {
+                let c = cache.borrow();
+                (
+                    c.audio_category.clone(),
+                    c.audio_search.to_ascii_lowercase(),
+                )
+            };
+            let mut c = cache.borrow_mut();
+            let actual = c
+                .audio_entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| audio_entry_matches(e, &category, &search))
+                .nth(visible)
+                .map(|(i, _)| i);
+            if let Some(actual) = actual {
+                c.audio_entries.remove(actual);
+                let entries = c.audio_entries.clone();
+                drop(c);
+                app_config.borrow_mut().audio_entries = entries;
+                config::save(&app_config.borrow());
+                update_audio_list(&ui, &cache);
+            }
+        });
     }
     {
         let ui_weak = ui.as_weak();
-        ui.on_audio_entry_play(move |_| { if let Some(ui) = ui_weak.upgrade() { let index = ui.get_audio_entry_index(); ui.invoke_audio_entry_double_clicked(index); ui.invoke_audio_entry_double_clicked(index); } });
+        let cache = cache.clone();
+        ui.on_audio_entry_explorer_rename(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let index = ui.get_audio_entry_index().max(0) as usize;
+            let c = cache.borrow();
+            let category = c.audio_category.clone();
+            let search = c.audio_search.to_ascii_lowercase();
+            if let Some(entry) = c
+                .audio_entries
+                .iter()
+                .filter(|e| audio_entry_matches(e, &category, &search))
+                .nth(index)
+            {
+                let _ = std::process::Command::new("explorer.exe")
+                    .args(["/select,", &entry.path])
+                    .spawn();
+            }
+        });
     }
     {
-        let ui_weak = ui.as_weak(); let cache = cache.clone();
-        ui.on_audio_entry_edit_tags(move || { if let Some(ui) = ui_weak.upgrade() { let visible = ui.get_audio_entry_index() as usize; let c = cache.borrow(); let category = c.audio_category.clone(); let search = c.audio_search.to_ascii_lowercase(); if let Some(entry) = c.audio_entries.iter().filter(|e| (category == "全部" || e.category == category) && (search.is_empty() || e.name.to_ascii_lowercase().contains(&search))).nth(visible) { ui.set_audio_entry_edit_name(entry.name.clone().into()); } } });
+        let ui_weak = ui.as_weak();
+        let cache = cache.clone();
+        ui.on_audio_entry_edit_file(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let index = ui.get_audio_entry_index().max(0) as usize;
+            let c = cache.borrow();
+            let category = c.audio_category.clone();
+            let search = c.audio_search.to_ascii_lowercase();
+            if let Some(entry) = c
+                .audio_entries
+                .iter()
+                .filter(|e| audio_entry_matches(e, &category, &search))
+                .nth(index)
+            {
+                let _ = std::process::Command::new("explorer.exe")
+                    .arg(&entry.path)
+                    .spawn();
+            }
+        });
     }
     {
-        let ui_weak = ui.as_weak(); let cache = cache.clone(); let app_config = app_config.clone();
-        ui.on_audio_entry_save_tags(move || { let Some(ui) = ui_weak.upgrade() else { return; }; let visible = ui.get_audio_entry_index() as usize; let name = ui.get_audio_entry_edit_name().trim().to_string(); if name.is_empty() { return; } let (category, search) = { let c = cache.borrow(); (c.audio_category.clone(), c.audio_search.to_ascii_lowercase()) }; let mut c = cache.borrow_mut(); if let Some(entry) = c.audio_entries.iter_mut().filter(|e| (category == "全部" || e.category == category) && (search.is_empty() || e.name.to_ascii_lowercase().contains(&search))).nth(visible) { entry.name = name; } let entries = c.audio_entries.clone(); drop(c); app_config.borrow_mut().audio_entries = entries; config::save(&app_config.borrow()); update_audio_list(&ui, &cache); ui.set_error_text("音频名称已更新".into()); });
+        let ui_weak = ui.as_weak();
+        let cache = cache.clone();
+        let app_config = app_config.clone();
+        ui.on_audio_entry_remove_hotkey(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let visible = ui.get_audio_entry_index().max(0) as usize;
+            let (category, search) = {
+                let c = cache.borrow();
+                (
+                    c.audio_category.clone(),
+                    c.audio_search.to_ascii_lowercase(),
+                )
+            };
+            let mut cfg = app_config.borrow_mut();
+            if let Some(entry) = cfg
+                .audio_entries
+                .iter_mut()
+                .filter(|e| audio_entry_matches(e, &category, &search))
+                .nth(visible)
+            {
+                entry.hotkey = None;
+            }
+            config::save(&cfg);
+            ui.set_error_text("音频热键已移除".into());
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let cache = cache.clone();
+        ui.on_audio_entry_edit_tags(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let visible = ui.get_audio_entry_index().max(0) as usize;
+                let c = cache.borrow();
+                let category = c.audio_category.clone();
+                let search = c.audio_search.to_ascii_lowercase();
+                if let Some(entry) = c
+                    .audio_entries
+                    .iter()
+                    .filter(|e| audio_entry_matches(e, &category, &search))
+                    .nth(visible)
+                {
+                    ui.set_audio_entry_edit_name(entry.name.clone().into());
+                }
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let cache = cache.clone();
+        let app_config = app_config.clone();
+        ui.on_audio_entry_save_tags(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let visible = ui.get_audio_entry_index().max(0) as usize;
+            let name = ui.get_audio_entry_edit_name().trim().to_string();
+            if name.is_empty() {
+                return;
+            }
+            let (category, search) = {
+                let c = cache.borrow();
+                (
+                    c.audio_category.clone(),
+                    c.audio_search.to_ascii_lowercase(),
+                )
+            };
+            let mut c = cache.borrow_mut();
+            if let Some(entry) = c
+                .audio_entries
+                .iter_mut()
+                .filter(|e| audio_entry_matches(e, &category, &search))
+                .nth(visible)
+            {
+                entry.name = name;
+            }
+            let entries = c.audio_entries.clone();
+            drop(c);
+            app_config.borrow_mut().audio_entries = entries;
+            config::save(&app_config.borrow());
+            update_audio_list(&ui, &cache);
+            ui.set_error_text("音频名称已更新".into());
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let cache = cache.clone();
+        ui.on_audio_entry_play(move |_| {
+            if let Some(ui) = ui_weak.upgrade() {
+                cache.borrow_mut().force_audio_play = true;
+                ui.invoke_audio_entry_double_clicked(ui.get_audio_entry_index());
+            }
+        });
     }
     {
         let ui_weak = ui.as_weak();
@@ -678,11 +1059,13 @@ fn wire_callbacks(
             let now = Instant::now();
             let should_play = {
                 let mut c = cache.borrow_mut();
+                let forced = c.force_audio_play;
+                c.force_audio_play = false;
                 let double = c.last_audio_click.is_some_and(|(last, time)| {
                     last == index as usize && now.duration_since(time) < Duration::from_millis(450)
                 });
                 c.last_audio_click = Some((index as usize, now));
-                double
+                forced || double
             };
             let Some(ui) = ui_weak.upgrade() else {
                 return;
@@ -697,10 +1080,7 @@ fn wire_callbacks(
                 let search = c.audio_search.to_ascii_lowercase();
                 c.audio_entries
                     .iter()
-                    .filter(|e| {
-                        (category == "全部" || e.category == category)
-                            && (search.is_empty() || e.name.to_ascii_lowercase().contains(&search))
-                    })
+                    .filter(|e| audio_entry_matches(e, &category, &search))
                     .nth(index as usize)
                     .cloned()
             };
@@ -720,6 +1100,9 @@ fn wire_callbacks(
                     }
                 }
                 ui.set_player_playing(false);
+                ui.set_audio_progress(0.0);
+                ui.set_audio_duration_seconds(0.0);
+                ui.set_audio_current_position("".into());
                 return;
             }
             if let Some(sender) = engine.sfx_sender().ok() {
@@ -731,23 +1114,69 @@ fn wire_callbacks(
                 }
             }
             ui.set_player_playing(false);
-            let cancel = Arc::new(AtomicBool::new(false));
-            if let Some(old) = cache.borrow_mut().audio_cancel.replace(cancel.clone()) { old.store(true, Ordering::Release); }
-            let preview_volume = app_config.borrow().preview_volume; let sender = engine.sfx_sender().ok(); let preview = preview.clone(); let looped = entry.loop_playback; let ui_for_worker = ui_weak.clone(); let path = std::path::PathBuf::from(&entry.path);
-            thread::spawn(move || {
-                match crate::audio::decode::stream_to_channel(path.clone(), looped, cancel.clone()).and_then(|(info, rx)| crate::audio::decode::stream_to_channel(path.clone(), looped, cancel.clone()).map(|(_, preview_rx)| (info, rx, preview_rx))) {
-                    Ok((info, rx, preview_rx)) => { if let Some(sender) = sender { let _ = sender.send(crate::audio::sfx::SfxCommand::PlayStream { sample_rate: info.sample_rate, channels: info.channels, mode: if looped { crate::audio::sfx::SfxMode::Loop } else { crate::audio::sfx::SfxMode::Once }, volume: 1.0, rx }); } if let Ok(mut guard) = preview.lock() { if guard.is_none() { *guard = crate::audio::preview::PreviewEngine::open_default().ok(); if let Some(p) = guard.as_ref() { p.set_volume(preview_volume); } } if let Some(p) = guard.as_ref() { p.play_stream(info, preview_rx, looped); } } let _ = slint::invoke_from_event_loop(move || { if let Some(ui) = ui_for_worker.upgrade() { ui.set_audio_current_name(entry.name.into()); ui.set_player_playing(true); } }); }
-                    Err(error) => { let _ = slint::invoke_from_event_loop(move || { if let Some(ui) = ui_for_worker.upgrade() { ui.set_error_text(error.user_message().into()); } }); }
-                }
-            });
+            ui.set_audio_progress(0.0);
+            ui.set_audio_duration_seconds(0.0);
+            ui.set_audio_current_position("".into());
+            start_playback(
+                &ui,
+                &engine,
+                &cache,
+                &preview,
+                app_config.borrow().preview_volume,
+                &entry,
+                0,
+            );
         });
     }
     {
+        let ui_weak = ui.as_weak();
         let engine = engine.clone();
-        ui.on_audio_progress_edited(move |position| {
-            if let Ok(sender) = engine.sfx_sender() {
-                let _ = sender.send(crate::audio::sfx::SfxCommand::Seek(position));
+        let cache = cache.clone();
+        let preview = preview.clone();
+        let app_config = app_config.clone();
+        ui.on_audio_progress_seek(move |position| {
+            let Some(playing) = cache.borrow().audio_playing.clone() else {
+                return;
+            };
+            if playing.duration_hns == 0 {
+                return;
             }
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let position = position.clamp(0.0, 1.0);
+            let target_hns = (f64::from(position) * playing.duration_hns as f64) as u64;
+            // 先停旧流，否则新旧两段会叠着放。
+            if let Ok(sender) = engine.sfx_sender() {
+                let _ = sender.send(crate::audio::sfx::SfxCommand::StopAll);
+            }
+            if let Ok(guard) = preview.lock() {
+                if let Some(p) = guard.as_ref() {
+                    p.stop_source();
+                }
+            }
+            let entry = config::AudioEntry {
+                name: playing.name.clone(),
+                path: playing.path.clone(),
+                category: String::new(),
+                duration_hns: playing.duration_hns,
+                loop_playback: playing.looped,
+                hotkey: None,
+            };
+            start_playback(
+                &ui,
+                &engine,
+                &cache,
+                &preview,
+                app_config.borrow().preview_volume,
+                &entry,
+                target_hns,
+            );
+            // 立刻回显目标位置，不用等解码线程出第一块。
+            ui.set_audio_progress(position);
+            ui.set_audio_current_position(
+                format_hns_position(target_hns, playing.duration_hns).into(),
+            );
         });
     }
     {
@@ -759,6 +1188,11 @@ fn wire_callbacks(
             if let Some(cancel) = cache.borrow_mut().audio_cancel.take() {
                 cancel.store(true, Ordering::Release);
             }
+            {
+                let mut c = cache.borrow_mut();
+                c.audio_playing = None;
+                c.audio_anchor = None;
+            }
             if let Ok(sender) = engine.sfx_sender() {
                 let _ = sender.send(crate::audio::sfx::SfxCommand::StopAll);
             }
@@ -769,6 +1203,9 @@ fn wire_callbacks(
             }
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_player_playing(false);
+                ui.set_audio_progress(0.0);
+                ui.set_audio_duration_seconds(0.0);
+                ui.set_audio_current_position("".into());
             }
         });
     }
@@ -1019,6 +1456,39 @@ fn start_status_timer(
             &render_hist.borrow(),
         );
 
+        // 进度按播放锚点换算，不再逐 tick 累加：跳转后位置立刻正确。
+        if ui.get_player_playing() && !ui.get_audio_seeking_progress() {
+            let duration_seconds = ui.get_audio_duration_seconds();
+            let anchor = cache.borrow().audio_anchor;
+            let looped = cache
+                .borrow()
+                .audio_playing
+                .as_ref()
+                .is_some_and(|playing| playing.looped);
+            if let (true, Some((start, offset_hns))) = (duration_seconds > 0.0, anchor) {
+                let duration_hns = (f64::from(duration_seconds) * 10_000_000.0) as u64;
+                let elapsed_hns = (start.elapsed().as_nanos() / 100) as u64;
+                let played_hns = offset_hns + elapsed_hns;
+                let ended = played_hns >= duration_hns;
+                if ended && !looped {
+                    ui.set_player_playing(false);
+                }
+                let shown_hns = if ended && !looped {
+                    duration_hns
+                } else if duration_hns == 0 {
+                    0
+                } else {
+                    played_hns % duration_hns
+                };
+                let progress = if duration_hns == 0 {
+                    0.0
+                } else {
+                    shown_hns as f32 / duration_hns as f32
+                };
+                ui.set_audio_progress(progress.clamp(0.0, 1.0));
+                ui.set_audio_current_position(format_hns_position(shown_hns, duration_hns).into());
+            }
+        }
         let idx = ui.get_device_index();
         if idx != last_dest_idx.get() {
             last_dest_idx.set(idx);
@@ -1204,22 +1674,103 @@ fn refill_devices(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>, initial: bool) 
     update_output_text(ui, cache);
     ui.set_about_text(about_text(cache).into());
 }
-/// 分类树模型。
+/// 分类树模型；内部保存路径，显示层只增加层级缩进。
 fn audio_categories(cache: &Rc<RefCell<UiCache>>) -> Vec<slint::SharedString> {
-    let c = cache.borrow();
-    let mut names = vec!["全部".to_string(), "未分类".to_string()];
-    for name in &c.audio_categories {
-        if !names.contains(name) {
-            names.push(name.clone());
-        }
-    }
-    for entry in &c.audio_entries {
-        if !names.contains(&entry.category) {
-            names.push(entry.category.clone());
-        }
-    }
-    names.into_iter().map(Into::into).collect()
+    category_paths(cache)
+        .into_iter()
+        .map(|path| category_display(&path).into())
+        .collect()
 }
+/// 启动时为旧配置补齐缺失的媒体时长；失效文件保留 0 并显示占位符。
+fn hydrate_audio_durations(app_config: &Rc<RefCell<config::AppConfig>>) -> bool {
+    let mut changed = false;
+    let mut config = app_config.borrow_mut();
+    for entry in &mut config.audio_entries {
+        if entry.duration_hns != 0 {
+            continue;
+        }
+        if let Ok(info) = crate::audio::decode::validate_file(std::path::Path::new(&entry.path)) {
+            entry.duration_hns = info.duration_hns;
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn category_matches(entry: &config::AudioEntry, category: &str) -> bool {
+    category == "全部"
+        || entry.category == category
+        || entry.category.starts_with(&format!("{category}/"))
+}
+
+fn audio_entry_matches(entry: &config::AudioEntry, category: &str, search: &str) -> bool {
+    category_matches(entry, category)
+        && (search.is_empty() || entry.name.to_ascii_lowercase().contains(search))
+}
+
+fn category_paths(cache: &Rc<RefCell<UiCache>>) -> Vec<String> {
+    let c = cache.borrow();
+    let mut paths = vec!["全部".to_string(), "未分类".to_string()];
+    let raw = c
+        .audio_categories
+        .iter()
+        .cloned()
+        .chain(c.audio_entries.iter().map(|entry| entry.category.clone()));
+    for path in raw {
+        let mut parent = String::new();
+        for part in path.split('/').filter(|part| !part.is_empty()) {
+            if !parent.is_empty() {
+                parent.push('/');
+            }
+            parent.push_str(part);
+            if !paths.contains(&parent) {
+                paths.push(parent.clone());
+            }
+        }
+    }
+    paths
+}
+
+fn category_leaf(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+fn category_display(path: &str) -> String {
+    if path == "全部" || path == "未分类" {
+        return path.to_string();
+    }
+    let depth = path.matches('/').count() + 1;
+    format!(
+        "{}{}",
+        "　　".repeat(depth.saturating_sub(1)),
+        category_leaf(path)
+    )
+}
+
+fn format_duration_hns(duration_hns: u64) -> String {
+    if duration_hns == 0 {
+        return "—".into();
+    }
+    let total_seconds = duration_hns / 10_000_000;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+/// 播放位置文案：「当前 / 总时长」。
+fn format_hns_position(position_hns: u64, duration_hns: u64) -> String {
+    format!(
+        "{} / {}",
+        format_duration_hns(position_hns),
+        format_duration_hns(duration_hns)
+    )
+}
+
 /// 按持久化的 ID / 名称恢复进程、输出设备与物理麦选择。
 fn restore_saved_selection(
     ui: &MainWindow,
@@ -1331,15 +1882,17 @@ fn update_audio_list(ui: &MainWindow, cache: &Rc<RefCell<UiCache>>) {
         )
     };
     let c = cache.borrow();
-    let names: Vec<slint::SharedString> = c
-        .audio_entries
-        .iter()
-        .filter(|entry| category == "全部" || entry.category == category)
-        .filter(|entry| search.is_empty() || entry.name.to_ascii_lowercase().contains(&search))
-        .map(|entry| entry.name.clone().into())
-        .collect();
+    let mut names = Vec::new();
+    let mut durations = Vec::new();
+    for entry in &c.audio_entries {
+        if audio_entry_matches(entry, &category, &search) {
+            names.push(entry.name.clone().into());
+            durations.push(format_duration_hns(entry.duration_hns).into());
+        }
+    }
     drop(c);
     ui.set_audio_entries(ModelRc::new(VecModel::from(names)));
+    ui.set_audio_entry_durations(ModelRc::new(VecModel::from(durations)));
     ui.set_audio_entry_index(-1);
 }
 

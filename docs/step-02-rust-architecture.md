@@ -1,6 +1,6 @@
 # Step 2 — Rust 架构
 
-基于 `docs/architecture-analysis.md`。这不是 C# 类图的翻译。
+基于 `docs/step-01-architecture-analysis.md`。这不是 C# 类图的翻译。
 
 产品：Windows 专用、极轻的 **Process Audio Router / Soundpad**。
 栈：Rust 2024 + Slint + windows-rs + WASAPI。
@@ -26,7 +26,7 @@ Target PID
 
 ## 2. 目录
 
-C# 源码已移除，分析结论见 `docs/architecture-analysis.md`，原始文件见 git 历史。Rust 工程在仓库根目录，不另起 monorepo。
+C# 源码已移除，分析结论见 `docs/step-01-architecture-analysis.md`，原始文件见 git 历史。Rust 工程在仓库根目录，不另起 monorepo。
 
 ```text
 Cargo.toml
@@ -52,8 +52,8 @@ src/
   engine.rs            常驻输出、动态源、Start/Stop 兼容入口
   ui_bridge.rs         Slint 属性 / 回调
 docs/
-  architecture-analysis.md
-  rust-architecture.md
+  step-01-architecture-analysis.md
+  step-02-rust-architecture.md
   step-*.md
 ```
 
@@ -232,12 +232,15 @@ ui/
 不再单独保留声板页；全局播放时按键只出现在设置页。
 
 - 进程列表：`出声 · exe  [pid]  title`，有窗口的排前面；三张路由卡片等比例伸缩，长文本在控件内部截断
-- 音频库：左侧可折叠分类树，右侧当前分类音频列表，双击播放到当前目标
+- 音频库：左侧按 `/` 路径展开的嵌套分类树，右侧当前分类音频列表，双击播放到当前目标
+- 音频列表索引按当前筛选结果从 1 开始；时长由 WAV 头或 Media Foundation 元数据计算并持久化
+- 音频库右键菜单由 Slint 绘制为 Windows 11 风格的白色圆角菜单，分类支持新增子分类、重命名和递归删除
+- 播放切换先停止旧源并清空 ring；流式播放器消费完整帧，避免缓冲边界重复帧；进度与总时长每 50 ms 更新
 - 音量：进程、物理麦、音效、总音量均为 0–100
 - 状态点 + 短句 + 输出名称 + 开始/停止
 - 刷新：重枚举进程和设备
 
-定时器 50 ms 从引擎抽状态（进程退出、设备失效、电平）。不把 PCM 送 UI。
+定时器 50 ms 从引擎抽状态（进程退出、设备失效、电平）并更新播放器进度。不会把 PCM 送 UI。
 
 
 ---

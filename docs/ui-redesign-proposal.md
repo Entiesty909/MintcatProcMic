@@ -20,7 +20,7 @@
 | 电平/声纹 | `src/audio/peak.rs` + UI `Voiceprint` | 保留，缩短后进状态栏与路由页 |
 | 全局热键 | `src/hotkey.rs`（`RegisterHotKey`） | **扩成多绑定系统**，见第七节 |
 | VB-CABLE 检测/安装 | `src/vbcable.rs` | 保留，挪进设置页 |
-| 设默认麦克风 | `src/audio/policy.rs` | 保留（可选勾选，停止后恢复） |
+| 设默认麦克风/默认通讯麦克风 | `src/audio/policy.rs` | 保留（可选勾选，停止后恢复） |
 | 状态短句 | `error.rs::user_message` | 保留，作为全局约定 |
 | CLI | `src/main.rs` | 保留（验证用） |
 
@@ -584,7 +584,7 @@ ui/
     settings.slint
 ```
 
-这**违反** `docs/rust-architecture.md` 第 9 节「单文件，不拆 components」——那条对三个控件成立，对四个页面不成立。重构时会同步改掉那节，按 AGENTS.md「同步被你改掉的事实」的要求。
+这**违反** `docs/step-02-rust-architecture.md` 第 9 节「单文件，不拆 components」——那条对三个控件成立，对四个页面不成立。重构时会同步改掉那节，按 AGENTS.md「同步被你改掉的事实」的要求。
 
 ---
 
@@ -664,9 +664,9 @@ TTS / 命名管道 / DRG Mod 安装（原 C# 项目的东西）、虚拟声卡�
 | `AGENTS.md` 第 2 节 | 「默认只允许：`windows`、`windows-core`、`slint`、`tracing`、`tracing-subscriber`」 | 白名单补 `serde`、`serde_json`（本次授权）。FFmpeg 禁令**保持不变** |
 | `AGENTS.md` 第 3.1 节模块树 | 只有 `ui/main.slint` | 补 `ui/theme.slint`、`ui/components/*`、`ui/pages/*`；`src/` 补 `audio/decode.rs`、`audio/sfx.rs`、`hotkey/` |
 | `AGENTS.md` 第 2 节硬禁止列表 | — | 「把核心音频状态塞进 Slint」等条目保留；新增一条：禁止在钩子回调里做任何除 `PostMessage` 以外的事 |
-| `docs/rust-architecture.md` 第 9 节 | 「`ui/main.slint` 单文件，不拆 components」 | 改为按第十一节的文件结构拆分，并说明理由（四页面规模） |
-| `docs/rust-architecture.md` 第 3、5 节 | 「UI/引擎」两线程 + `start(pid, device, mic)` | 改为第八节的「输出常驻 + 源动态加减 + 三条 ring + sfx 线程」，状态机补 `Reconnecting` |
-| `docs/rust-architecture.md` 第 7 节依赖表 | 无 serde、无 MF | 补 `serde`/`serde_json` 与 `Win32_Media_MediaFoundation` 的引入理由 |
-| `docs/rust-architecture.md` 第 13 节「明确不做」 | 含「热键」等 | 热键、配置、多源混音、文件播放移出「不做」清单 |
+| `docs/step-02-rust-architecture.md` 第 9 节 | 「`ui/main.slint` 单文件，不拆 components」 | 改为按第十一节的文件结构拆分，并说明理由（四页面规模） |
+| `docs/step-02-rust-architecture.md` 第 3、5 节 | 「UI/引擎」两线程 + `start(pid, device, mic)` | 改为第八节的「输出常驻 + 源动态加减 + 三条 ring + sfx 线程」，状态机补 `Reconnecting` |
+| `docs/step-02-rust-architecture.md` 第 7 节依赖表 | 无 serde、无 MF | 补 `serde`/`serde_json` 与 `Win32_Media_MediaFoundation` 的引入理由 |
+| `docs/step-02-rust-architecture.md` 第 13 节「明确不做」 | 含「热键」等 | 热键、配置、多源混音、文件播放移出「不做」清单 |
 
 `goal.md` 不改：本次没有违反它的任何禁令（FFmpeg/网络/数据库/自研驱动都没碰），只是它在第四节/第二十二节把快捷键、配置、多进程列为第二/三阶段——现在提前到同一批做，属于范围推进，不是方向变更。

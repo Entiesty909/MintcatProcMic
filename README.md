@@ -2,7 +2,7 @@
 
 轻量 Windows 进程音频路由器。把指定进程的声音经 WASAPI Process Loopback 送到所选输出设备。
 
-原 C# DRG SoundPad 仅作功能参考，见 `docs/architecture-analysis.md`。Rust 实现不是逐行移植。
+原 C# DRG SoundPad 仅作功能参考，见 `docs/step-01-architecture-analysis.md`。Rust 实现不是逐行移植。
 
 ## 要求
 
@@ -35,8 +35,8 @@ target\release\mintcat-proc-mic.exe                 UI
 | 文件 | 内容 |
 |---|---|
 | `AGENTS.md` | 给智能体的约束、代码规范、开始前/后流程 |
-| `docs/architecture-analysis.md` | C# 原项目分析 |
-| `docs/rust-architecture.md` | Rust 架构 |
+| `docs/step-01-architecture-analysis.md` | C# 原项目分析 |
+| `docs/step-02-rust-architecture.md` | Rust 架构 |
 | `docs/step-00-toolchain.md` | rustc / MSVC |
 | `docs/step-03-*.md` … | 各阶段实测 |
 

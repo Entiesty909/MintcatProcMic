@@ -9,7 +9,7 @@
 - `src/ui_bridge.rs`：持久化全局播放时按键模式。
 - `ui/pages/soundpad.slint`：删除，不再保留重复页面。
 - `docs/ui-redesign-proposal.md`：更新为三页架构与左分类树/右音频列表设计。
-- `docs/rust-architecture.md`：同步三页 UI 事实。
+- `docs/step-02-rust-architecture.md`：同步三页 UI 事实。
 
 最终信息架构：
 - 路由：进程声、物理麦、输出、混音、开始/停止。

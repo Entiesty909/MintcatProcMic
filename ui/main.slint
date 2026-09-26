@@ -1,45 +1,508 @@
+//! 主窗口：顶栏 + 三个页面 + 状态栏，以及覆盖全窗口的右键菜单层。
+
 import { Theme } from "theme.slint";
 import { TabBar } from "components/tab-bar.slint";
 import { PmButton } from "components/button.slint";
 import { SliderRow } from "components/slider-row.slint";
 import { CheckBox } from "std-widgets.slint";
+import { MenuItem } from "components/menu-item.slint";
 import { RoutePage } from "pages/route.slint";
 import { PlayerPage } from "pages/player.slint";
 import { SettingsPage } from "pages/settings.slint";
 
 export component MainWindow inherits Window {
     title: "ProcessMic";
-    min-width: 900px; min-height: 520px; preferred-width: 1080px; preferred-height: 560px;
-    background: Theme.bg; default-font-family: "Segoe UI Variable Text"; default-font-size: 14px;
-    in-out property <int> page: 0;
-    in-out property <string> status-text: "未运行"; in-out property <int> status-kind: 0; in-out property <string> error-text: "";
-    in-out property <bool> running: false; in-out property <float> master-volume: 100; in-out property <string> output-name: ""; in-out property <string> about-text: "";
-    in-out property <[string]> processes: []; in-out property <int> process-index: 0; in-out property <string> process-filter: ""; in-out property <string> selected-processes: "";
-    in-out property <float> volume: 100; in-out property <float> mic-volume: 100; in-out property <bool> has-mic: false; in-out property <string> mic-name: ""; in-out property <bool> mix-mic: false;
-    in-out property <[string]> audio-categories: ["全部", "未分类"]; in-out property <int> audio-category-index: 0; in-out property <string> audio-category-edit-name: ""; in-out property <[string]> audio-entries: [];
-    in-out property <int> audio-entry-index: -1; in-out property <float> audio-progress: 0; in-out property <string> audio-search: ""; in-out property <string> audio-current-name: ""; in-out property <string> audio-current-position: ""; in-out property <string> audio-entry-edit-name: ""; in-out property <bool> audio-category-menu-open: false; in-out property <bool> audio-entry-menu-open: false;
-    in-out property <bool> player-loop: false; in-out property <bool> player-playing: false;
-    in-out property <[string]> devices: []; in-out property <int> device-index: 0; in-out property <[bool]> device-selected: []; in-out property <bool> all-devices: false; in-out property <[string]> mics: []; in-out property <int> mic-index: 0;
-    in-out property <bool> show-set-default-mic: false; in-out property <bool> set-default-mic: false; in-out property <bool> set-default-render: false; in-out property <bool> set-default-communications: false; in-out property <string> dest-hint: "";
-    in-out property <bool> preview-enabled: false; in-out property <float> preview-volume: 50; in-out property <bool> cable-installed: false; in-out property <bool> cable-busy: false; in-out property <string> cable-text: "";
-    in-out property <string> hotkey-label: ""; in-out property <bool> listening-hotkey: false; in-out property <string> playback-key-label: "未设置"; in-out property <int> playback-key-mode: 0;
-    in-out property <[float]> capture-wave: []; in-out property <[float]> mic-wave: []; in-out property <[float]> render-wave: [];
+    min-width: 900px;
+    min-height: 520px;
+    preferred-width: 1080px;
+    preferred-height: 560px;
+    background: Theme.bg;
+    default-font-family: "Segoe UI Variable Text";
+    default-font-size: 14px;
 
-    callback start-stop(); callback refresh(); callback volume-edited(float); callback mic-volume-edited(float); callback master-volume-edited(float); callback process-filter-changed(string); callback process-add(); callback process-clear(); callback mix-mic-toggled(bool);
-    callback all-devices-toggled(bool); callback device-toggled(int, bool); callback set-default-mic-toggled(bool); callback set-default-render-toggled(bool); callback set-default-communications-toggled(bool);
-    callback preview-enabled-toggled(bool); callback preview-volume-edited(float); callback install-cable(); callback begin-hotkey-capture(); callback reset-hotkey(); callback hotkey-captured(string, bool, bool, bool); callback playback-key-mode-toggled(int);
-    callback add-audio-files(); callback audio-category-changed(int); callback audio-category-context(int); callback audio-category-new(); callback category-rename(); callback category-delete(); callback audio-search-changed(string); callback audio-entry-double-clicked(int); callback audio-entry-context(int); callback audio-entry-play(int); callback audio-entry-remove(); callback audio-entry-hotkey(); callback audio-entry-remove-hotkey(); callback audio-entry-explorer-rename(); callback audio-entry-edit-tags(); callback audio-entry-save-tags(); callback audio-entry-edit-file(); callback audio-progress-edited(float); callback audio-stop();
+    // --- 全局状态 ---
+    in-out property <int> page: 0;
+    in-out property <string> status-text: "未运行";
+    in-out property <int> status-kind: 0;
+    in-out property <string> error-text: "";
+    in-out property <bool> running: false;
+
+    // --- 路由页 ---
+    in-out property <[string]> processes: [];
+    in-out property <int> process-index: 0;
+    in-out property <string> process-filter: "";
+    in-out property <string> selected-processes: "";
+    in-out property <float> volume: 100;
+    in-out property <float> mic-volume: 100;
+    in-out property <bool> has-mic: false;
+    in-out property <string> mic-name: "";
+    in-out property <bool> mix-mic: false;
+    in-out property <[float]> capture-wave: [];
+    in-out property <[float]> mic-wave: [];
+    in-out property <[float]> render-wave: [];
+
+    // --- 音频库 ---
+    in-out property <[string]> audio-categories: ["全部", "未分类"];
+    in-out property <int> audio-category-index: 0;
+    in-out property <string> audio-category-edit-name: "";
+    in-out property <[string]> audio-entries: [];
+    in-out property <[string]> audio-entry-durations: [];
+    in-out property <string> audio-search: "";
+    in-out property <int> audio-entry-index: -1;
+    in-out property <string> audio-entry-edit-name: "";
+    in-out property <float> audio-progress: 0;
+    in-out property <bool> audio-seeking-progress: false;
+    in-out property <string> audio-current-name: "";
+    in-out property <string> audio-current-position: "";
+    in-out property <float> audio-duration-seconds: 0;
+    in-out property <bool> player-loop: false;
+    in-out property <bool> player-playing: false;
+
+    // 右键菜单的开关与锚点，坐标用窗口坐标。
+    in-out property <bool> audio-category-menu-open: false;
+    in-out property <bool> audio-entry-menu-open: false;
+    in-out property <length> audio-category-menu-x: 0px;
+    in-out property <length> audio-category-menu-y: 0px;
+    in-out property <length> audio-entry-menu-x: 0px;
+    in-out property <length> audio-entry-menu-y: 0px;
+
+    // --- 设置页 ---
+    in-out property <[string]> devices: [];
+    in-out property <int> device-index: 0;
+    in-out property <[bool]> device-selected: [];
+    in-out property <bool> all-devices: false;
+    in-out property <[string]> mics: [];
+    in-out property <int> mic-index: 0;
+    in-out property <bool> show-set-default-mic: false;
+    in-out property <bool> set-default-mic: false;
+    in-out property <bool> set-default-render: false;
+    in-out property <bool> set-default-communications: false;
+    in-out property <string> dest-hint: "";
+    in-out property <bool> preview-enabled: false;
+    in-out property <float> preview-volume: 50;
+    in-out property <bool> cable-installed: false;
+    in-out property <bool> cable-busy: false;
+    in-out property <string> cable-text: "";
+    in-out property <string> hotkey-label: "";
+    in-out property <bool> listening-hotkey: false;
+    in-out property <string> playback-key-label: "未设置";
+    in-out property <int> playback-key-mode: 0;
+
+    // --- 状态栏 ---
+    in-out property <float> master-volume: 100;
+    in-out property <string> output-name: "";
+    in-out property <string> about-text: "";
+
+    // --- 回调 ---
+    callback start-stop();
+    callback refresh();
+    callback volume-edited(float);
+    callback mic-volume-edited(float);
+    callback master-volume-edited(float);
+    callback process-filter-changed(string);
+    callback process-add();
+    callback process-clear();
+    callback mix-mic-toggled(bool);
+    callback all-devices-toggled(bool);
+    callback device-toggled(int, bool);
+    callback set-default-mic-toggled(bool);
+    callback set-default-render-toggled(bool);
+    callback set-default-communications-toggled(bool);
+    callback preview-enabled-toggled(bool);
+    callback preview-volume-edited(float);
+    callback install-cable();
+    callback begin-hotkey-capture();
+    callback reset-hotkey();
+    callback hotkey-captured(string, bool, bool, bool);
+    callback playback-key-mode-toggled(int);
+    callback add-audio-files();
+    callback audio-category-changed(int);
+    callback audio-category-context(int);
+    callback audio-category-new();
+    callback category-rename();
+    callback category-delete();
+    callback audio-search-changed(string);
+    callback audio-entry-double-clicked(int);
+    callback audio-entry-context(int);
+    callback audio-entry-play(int);
+    callback audio-entry-remove();
+    callback audio-entry-hotkey();
+    callback audio-entry-remove-hotkey();
+    callback audio-entry-explorer-rename();
+    callback audio-entry-edit-tags();
+    callback audio-entry-save-tags();
+    callback audio-entry-edit-file();
+    callback audio-progress-seek(float);
+    callback audio-stop();
 
     FocusScope {
-        key-pressed(event) => { if (root.listening-hotkey) { root.hotkey-captured(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt); accept } else { reject } }
-        VerticalLayout {
-            Rectangle { height: Theme.topBarHeight; background: transparent; HorizontalLayout { padding-left: Theme.padPage; padding-right: Theme.padPage; spacing: 16px; alignment: LayoutAlignment.center; Text { text: "ProcessMic"; font-size: 20px; font-weight: 700; color: Theme.text; vertical-alignment: TextVerticalAlignment.center; } TabBar { current: root.page; picked(i) => { root.page = i; } } Rectangle { horizontal-stretch: 1; background: transparent; } } }
-            Rectangle { vertical-stretch: 1; min-height: 0px; clip: true; background: transparent;
-                if root.page == 0: RoutePage { width: 100%; height: 100%; min-width: 0px; min-height: 0px; processes <=> root.processes; process-index <=> root.process-index; process-filter <=> root.process-filter; selected-processes <=> root.selected-processes; volume <=> root.volume; mic-volume <=> root.mic-volume; capture-wave <=> root.capture-wave; mic-wave <=> root.mic-wave; render-wave <=> root.render-wave; output-name <=> root.output-name; dest-hint <=> root.dest-hint; running <=> root.running; has-mic <=> root.has-mic; mic-name <=> root.mic-name; refresh => { root.refresh(); } filter-changed(t) => { root.process-filter-changed(t); } process-add => { root.process-add(); } process-clear => { root.process-clear(); } volume-edited(v) => { root.volume-edited(v); } mic-volume-edited(v) => { root.mic-volume-edited(v); } open-settings => { root.page = 2; } }
-                if root.page == 1: PlayerPage { width: 100%; height: 100%; output-name <=> root.output-name; categories <=> root.audio-categories; category-index <=> root.audio-category-index; category-edit-name <=> root.audio-category-edit-name; entries <=> root.audio-entries; entry-index <=> root.audio-entry-index; progress <=> root.audio-progress; search <=> root.audio-search; current-name <=> root.audio-current-name; current-position <=> root.audio-current-position; loop <=> root.player-loop; playing <=> root.player-playing; entry-edit-name <=> root.audio-entry-edit-name; category-menu-open <=> root.audio-category-menu-open; entry-menu-open <=> root.audio-entry-menu-open; category-changed(i) => { root.audio-category-changed(i); } category-context(i) => { root.audio-category-context(i); } category-new => { root.audio-category-new(); } category-rename => { root.category-rename(); } category-delete => { root.category-delete(); } entry-context(i) => { root.audio-entry-context(i); } entry-play(m) => { root.audio-entry-play(m); } entry-remove => { root.audio-entry-remove(); } entry-hotkey => { root.audio-entry-hotkey(); } entry-remove-hotkey => { root.audio-entry-remove-hotkey(); } entry-explorer-rename => { root.audio-entry-explorer-rename(); } entry-edit-tags => { root.audio-entry-edit-tags(); } entry-save-tags => { root.audio-entry-save-tags(); } entry-edit-file => { root.audio-entry-edit-file(); } search-changed(t) => { root.audio-search-changed(t); } entry-double-clicked(i) => { root.audio-entry-double-clicked(i); } progress-edited(v) => { root.audio-progress-edited(v); } add-files => { root.add-audio-files(); } stop => { root.audio-stop(); } }
-                if root.page == 2: SettingsPage { width: 100%; height: 100%; min-width: 0px; min-height: 0px; devices <=> root.devices; device-index <=> root.device-index; device-selected <=> root.device-selected; all-devices <=> root.all-devices; show-set-default-mic <=> root.show-set-default-mic; set-default-mic <=> root.set-default-mic; set-default-render <=> root.set-default-render; set-default-communications <=> root.set-default-communications; dest-hint <=> root.dest-hint; mics <=> root.mics; mic-index <=> root.mic-index; running <=> root.running; cable-installed <=> root.cable-installed; cable-busy <=> root.cable-busy; cable-text <=> root.cable-text; hotkey-label <=> root.hotkey-label; listening-hotkey <=> root.listening-hotkey; playback-key-label <=> root.playback-key-label; playback-key-mode <=> root.playback-key-mode; preview-enabled <=> root.preview-enabled; preview-volume <=> root.preview-volume; about-text <=> root.about-text; refresh => { root.refresh(); } install-cable => { root.install-cable(); } begin-hotkey-capture => { root.begin-hotkey-capture(); } reset-hotkey => { root.reset-hotkey(); } all-devices-toggled(b) => { root.all-devices-toggled(b); } device-toggled(i,b) => { root.device-toggled(i,b); } set-default-mic-toggled(b) => { root.set-default-mic-toggled(b); } set-default-render-toggled(b) => { root.set-default-render-toggled(b); } set-default-communications-toggled(b) => { root.set-default-communications-toggled(b); } playback-key-mode-toggled(m) => { root.playback-key-mode-toggled(m); } preview-enabled-toggled(b) => { root.preview-enabled-toggled(b); } preview-volume-edited(v) => { root.preview-volume-edited(v); } }
+        key-pressed(event) => {
+            if (root.listening-hotkey) {
+                root.hotkey-captured(
+                    event.text,
+                    event.modifiers.control,
+                    event.modifiers.shift,
+                    event.modifiers.alt
+                );
+                accept
+            } else if (event.text == "\u{1b}"
+                && (root.audio-category-menu-open || root.audio-entry-menu-open)) {
+                // Esc 关菜单，和 Windows 右键菜单一致。
+                root.audio-category-menu-open = false;
+                root.audio-entry-menu-open = false;
+                accept
+            } else {
+                reject
             }
-            Rectangle { height: root.error-text == "" ? Theme.statusBarHeight : Theme.statusBarHeight + 22px; background: transparent; HorizontalLayout { padding-left: Theme.padPage; padding-right: Theme.padPage; padding-bottom: Theme.gap; spacing: Theme.gap; VerticalLayout { spacing: 4px; alignment: LayoutAlignment.center; if root.error-text != "": Text { text: root.error-text; color: Theme.danger; font-size: 13px; wrap: word-wrap; } HorizontalLayout { height: Theme.controlHeight; spacing: Theme.gap; alignment: LayoutAlignment.center; Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.status-kind == 1 ? Theme.ok : (root.status-kind == 2 ? Theme.warn : (root.status-kind == 3 ? Theme.danger : Theme.text3)); } Text { text: root.status-text; color: Theme.text; font-size: 13px; font-weight: 600; vertical-alignment: TextVerticalAlignment.center; } Text { text: root.output-name == "" ? "输出：未选择" : "输出：" + root.output-name; color: Theme.text2; font-size: 13px; vertical-alignment: TextVerticalAlignment.center; } Rectangle { horizontal-stretch: 1; background: transparent; } CheckBox { text: "混入物理麦"; checked <=> root.mix-mic; enabled: !root.running && root.has-mic; toggled => { root.mix-mic-toggled(self.checked); } } SliderRow { width: 260px; label: "总音量"; value <=> root.master-volume; edited(v) => { root.master-volume-edited(v); } } PmButton { label: root.running ? "停止转发" : "开始转发"; filled: !root.running; danger: root.running; enabled: !root.cable-busy; clicked => { root.start-stop(); } } } } } }
+        }
+
+        VerticalLayout {
+            // 顶栏：标题 + 分页
+            Rectangle {
+                height: Theme.topBarHeight;
+                background: transparent;
+                HorizontalLayout {
+                    padding-left: Theme.padPage;
+                    padding-right: Theme.padPage;
+                    spacing: 16px;
+                    alignment: LayoutAlignment.center;
+                    Text {
+                        text: "ProcessMic";
+                        font-size: 20px;
+                        font-weight: 700;
+                        color: Theme.text;
+                        vertical-alignment: TextVerticalAlignment.center;
+                    }
+                    TabBar {
+                        current: root.page;
+                        picked(i) => {
+                            root.page = i;
+                            root.audio-category-menu-open = false;
+                            root.audio-entry-menu-open = false;
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                }
+            }
+
+            // 页面容器
+            Rectangle {
+                vertical-stretch: 1;
+                min-height: 0px;
+                clip: true;
+                background: transparent;
+
+                if root.page == 0: RoutePage {
+                    width: 100%;
+                    height: 100%;
+                    min-width: 0px;
+                    min-height: 0px;
+                    processes <=> root.processes;
+                    process-index <=> root.process-index;
+                    process-filter <=> root.process-filter;
+                    selected-processes <=> root.selected-processes;
+                    volume <=> root.volume;
+                    mic-volume <=> root.mic-volume;
+                    capture-wave <=> root.capture-wave;
+                    mic-wave <=> root.mic-wave;
+                    render-wave <=> root.render-wave;
+                    output-name <=> root.output-name;
+                    dest-hint <=> root.dest-hint;
+                    running <=> root.running;
+                    has-mic <=> root.has-mic;
+                    mic-name <=> root.mic-name;
+                    refresh => { root.refresh(); }
+                    filter-changed(t) => { root.process-filter-changed(t); }
+                    process-add => { root.process-add(); }
+                    process-clear => { root.process-clear(); }
+                    volume-edited(v) => { root.volume-edited(v); }
+                    mic-volume-edited(v) => { root.mic-volume-edited(v); }
+                    open-settings => { root.page = 2; }
+                }
+
+                if root.page == 1: PlayerPage {
+                    width: 100%;
+                    height: 100%;
+                    output-name <=> root.output-name;
+                    categories <=> root.audio-categories;
+                    category-index <=> root.audio-category-index;
+                    category-edit-name <=> root.audio-category-edit-name;
+                    entries <=> root.audio-entries;
+                    entry-durations <=> root.audio-entry-durations;
+                    entry-index <=> root.audio-entry-index;
+                    entry-edit-name <=> root.audio-entry-edit-name;
+                    progress <=> root.audio-progress;
+                    seeking-progress <=> root.audio-seeking-progress;
+                    search <=> root.audio-search;
+                    current-name <=> root.audio-current-name;
+                    current-position <=> root.audio-current-position;
+                    duration-seconds <=> root.audio-duration-seconds;
+                    loop <=> root.player-loop;
+                    playing <=> root.player-playing;
+                    category-menu-open <=> root.audio-category-menu-open;
+                    entry-menu-open <=> root.audio-entry-menu-open;
+                    category-menu-x <=> root.audio-category-menu-x;
+                    category-menu-y <=> root.audio-category-menu-y;
+                    entry-menu-x <=> root.audio-entry-menu-x;
+                    entry-menu-y <=> root.audio-entry-menu-y;
+                    category-changed(i) => { root.audio-category-changed(i); }
+                    category-context(i) => { root.audio-category-context(i); }
+                    search-changed(t) => { root.audio-search-changed(t); }
+                    entry-double-clicked(i) => { root.audio-entry-double-clicked(i); }
+                    entry-context(i) => { root.audio-entry-context(i); }
+                    entry-edit-tags => { root.audio-entry-edit-tags(); }
+                    entry-save-tags => { root.audio-entry-save-tags(); }
+                    progress-seek(v) => { root.audio-progress-seek(v); }
+                    add-files => { root.add-audio-files(); }
+                    stop => { root.audio-stop(); }
+                }
+
+                if root.page == 2: SettingsPage {
+                    width: 100%;
+                    height: 100%;
+                    min-width: 0px;
+                    min-height: 0px;
+                    devices <=> root.devices;
+                    device-index <=> root.device-index;
+                    device-selected <=> root.device-selected;
+                    all-devices <=> root.all-devices;
+                    show-set-default-mic <=> root.show-set-default-mic;
+                    set-default-mic <=> root.set-default-mic;
+                    set-default-render <=> root.set-default-render;
+                    set-default-communications <=> root.set-default-communications;
+                    dest-hint <=> root.dest-hint;
+                    mics <=> root.mics;
+                    mic-index <=> root.mic-index;
+                    running <=> root.running;
+                    cable-installed <=> root.cable-installed;
+                    cable-busy <=> root.cable-busy;
+                    cable-text <=> root.cable-text;
+                    hotkey-label <=> root.hotkey-label;
+                    listening-hotkey <=> root.listening-hotkey;
+                    playback-key-label <=> root.playback-key-label;
+                    playback-key-mode <=> root.playback-key-mode;
+                    preview-enabled <=> root.preview-enabled;
+                    preview-volume <=> root.preview-volume;
+                    about-text <=> root.about-text;
+                    refresh => { root.refresh(); }
+                    install-cable => { root.install-cable(); }
+                    begin-hotkey-capture => { root.begin-hotkey-capture(); }
+                    reset-hotkey => { root.reset-hotkey(); }
+                    all-devices-toggled(b) => { root.all-devices-toggled(b); }
+                    device-toggled(i, b) => { root.device-toggled(i, b); }
+                    set-default-mic-toggled(b) => { root.set-default-mic-toggled(b); }
+                    set-default-render-toggled(b) => { root.set-default-render-toggled(b); }
+                    set-default-communications-toggled(b) => {
+                        root.set-default-communications-toggled(b);
+                    }
+                    playback-key-mode-toggled(m) => { root.playback-key-mode-toggled(m); }
+                    preview-enabled-toggled(b) => { root.preview-enabled-toggled(b); }
+                    preview-volume-edited(v) => { root.preview-volume-edited(v); }
+                }
+            }
+
+            // 状态栏
+            Rectangle {
+                height: root.error-text == ""
+                    ? Theme.statusBarHeight
+                    : Theme.statusBarHeight + 22px;
+                background: transparent;
+                HorizontalLayout {
+                    padding-left: Theme.padPage;
+                    padding-right: Theme.padPage;
+                    padding-bottom: Theme.gap;
+                    spacing: Theme.gap;
+                    VerticalLayout {
+                        spacing: 4px;
+                        alignment: LayoutAlignment.center;
+                        if root.error-text != "": Text {
+                            text: root.error-text;
+                            color: Theme.danger;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            height: Theme.controlHeight;
+                            spacing: Theme.gap;
+                            alignment: LayoutAlignment.center;
+                            Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 4px;
+                                background: root.status-kind == 1
+                                    ? Theme.ok
+                                    : (root.status-kind == 2
+                                        ? Theme.warn
+                                        : (root.status-kind == 3 ? Theme.danger : Theme.text3));
+                            }
+                            Text {
+                                text: root.status-text;
+                                color: Theme.text;
+                                font-size: 13px;
+                                font-weight: 600;
+                                vertical-alignment: TextVerticalAlignment.center;
+                            }
+                            Text {
+                                text: root.output-name == "" ? "输出：未选择" : "输出：" + root.output-name;
+                                color: Theme.text2;
+                                font-size: 13px;
+                                vertical-alignment: TextVerticalAlignment.center;
+                            }
+                            Rectangle { horizontal-stretch: 1; background: transparent; }
+                            CheckBox {
+                                text: "混入物理麦";
+                                checked <=> root.mix-mic;
+                                enabled: !root.running && root.has-mic;
+                                toggled => { root.mix-mic-toggled(self.checked); }
+                            }
+                            SliderRow {
+                                width: 260px;
+                                label: "总音量";
+                                value <=> root.master-volume;
+                                edited(v) => { root.master-volume-edited(v); }
+                            }
+                            PmButton {
+                                label: root.running ? "停止转发" : "开始转发";
+                                filled: !root.running;
+                                danger: root.running;
+                                enabled: !root.cable-busy;
+                                clicked => { root.start-stop(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 菜单层：整层覆盖全窗口，先铺一层遮罩接管“点别处”，菜单声明在其后位于上层。
+    // 坐标是窗口坐标，贴边时往回收，避免菜单跑出窗口。
+    if root.audio-category-menu-open || root.audio-entry-menu-open: Rectangle {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+
+        TouchArea {
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    root.audio-category-menu-open = false;
+                    root.audio-entry-menu-open = false;
+                }
+            }
+        }
+
+        // 分类菜单：8px 内边距 + 20px 标题 + 3 条 × 30px + 4 个 2px 间隔 = 132px
+        if root.audio-category-menu-open: Rectangle {
+            x: min(max(0px, root.audio-category-menu-x), root.width - 256px);
+            y: min(max(0px, root.audio-category-menu-y), root.height - 140px);
+            width: 248px;
+            height: 132px;
+            background: #F8F8F8;
+            border-color: #B8B8B8;
+            border-width: 1px;
+            border-radius: 3px;
+
+            VerticalLayout {
+                padding: 8px;
+                spacing: 2px;
+                alignment: LayoutAlignment.start;
+                Rectangle {
+                    height: 20px;
+                    background: transparent;
+                    Text {
+                        text: "分类";
+                        x: 12px;
+                        color: #666666;
+                        font-size: 11px;
+                        vertical-alignment: TextVerticalAlignment.center;
+                    }
+                }
+                MenuItem {
+                    label: "新建子分类";
+                    clicked => { root.audio-category-new(); root.audio-category-menu-open = false; }
+                }
+                MenuItem {
+                    label: "重命名";
+                    enabled: root.audio-category-index > 1;
+                    clicked => { root.category-rename(); root.audio-category-menu-open = false; }
+                }
+                MenuItem {
+                    label: "删除";
+                    danger: true;
+                    enabled: root.audio-category-index > 1;
+                    clicked => { root.category-delete(); root.audio-category-menu-open = false; }
+                }
+            }
+        }
+
+        // 音频菜单：8px 内边距 + 20px 标题 + 8 条 × 30px + 9 个 2px 间隔 = 292px
+        if root.audio-entry-menu-open: Rectangle {
+            x: min(max(0px, root.audio-entry-menu-x), root.width - 300px);
+            y: min(max(0px, root.audio-entry-menu-y), root.height - 300px);
+            width: 292px;
+            height: 292px;
+            background: #F8F8F8;
+            border-color: #B8B8B8;
+            border-width: 1px;
+            border-radius: 3px;
+
+            VerticalLayout {
+                padding: 8px;
+                spacing: 2px;
+                alignment: LayoutAlignment.start;
+                Rectangle {
+                    height: 20px;
+                    background: transparent;
+                    Text {
+                        text: "音频";
+                        x: 12px;
+                        color: #666666;
+                        font-size: 11px;
+                        vertical-alignment: TextVerticalAlignment.center;
+                    }
+                }
+                MenuItem {
+                    label: "播放（扬声器和麦克风）";
+                    clicked => { root.audio-entry-play(0); root.audio-entry-menu-open = false; }
+                }
+                MenuItem {
+                    label: "仅在扬声器播放";
+                    clicked => { root.audio-entry-play(1); root.audio-entry-menu-open = false; }
+                }
+                MenuItem {
+                    label: "仅在麦克风播放";
+                    clicked => { root.audio-entry-play(2); root.audio-entry-menu-open = false; }
+                }
+                MenuItem {
+                    label: "移除";
+                    danger: true;
+                    clicked => { root.audio-entry-remove(); root.audio-entry-menu-open = false; }
+                }
+                MenuItem {
+                    label: "设置热键";
+                    clicked => { root.audio-entry-hotkey(); root.audio-entry-menu-open = false; }
+                }
+                MenuItem {
+                    label: "移除热键";
+                    clicked => {
+                        root.audio-entry-remove-hotkey();
+                        root.audio-entry-menu-open = false;
+                    }
+                }
+                MenuItem {
+                    label: "在资源管理器中显示";
+                    clicked => {
+                        root.audio-entry-explorer-rename();
+                        root.audio-entry-menu-open = false;
+                    }
+                }
+                MenuItem {
+                    label: "编辑文件";
+                    clicked => { root.audio-entry-edit-file(); root.audio-entry-menu-open = false; }
+                }
+            }
         }
     }
 }

@@ -36,7 +36,9 @@ pub fn set_default_communications(device_id: &str) -> std::result::Result<(), Er
 
 /// 恢复之前保存的默认端点（role, id）。
 pub fn restore_defaults(saved: &[(u32, String)]) -> std::result::Result<(), Error> {
-    for (role, id) in saved { set_default(id, &[*role])?; }
+    for (role, id) in saved {
+        set_default(id, &[*role])?;
+    }
     Ok(())
 }
 

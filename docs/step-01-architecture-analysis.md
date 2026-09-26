@@ -253,4 +253,4 @@ Audio Engine 不得出现 `DeepRockGalactic` 字符串。
 5. **依赖白名单**：`windows`、`slint`、`tracing`（开发日志）。配置用标准库 + 少量 `serde`/`serde_json`（第二阶段才真正读写文件）。
 6. **验证阶梯**：枚举进程 → 枚举设备 → 捕获写 WAV → 实时转发 → UI → 音量/启停/错误 → 测体积与内存。
 
-Step 1 完成。下一步：`docs/rust-architecture.md`。
+Step 1 完成。下一步：`docs/step-02-rust-architecture.md`。

@@ -1,10 +1,10 @@
 //! Media Foundation 文件音频读取：mp3 / mp4 / m4a / flac / wma，视频轨只忽略不解码。
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Receiver;
+use std::sync::Arc;
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::mpsc::Receiver;
 use std::thread;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
@@ -41,6 +41,7 @@ pub struct MfReader {
     reader: IMFSourceReader,
     info: MediaInfo,
     format: AudioFormat,
+    pending: Vec<f32>,
 }
 
 /// 统一打开入口。
@@ -69,9 +70,9 @@ pub fn validate_file(path: &Path) -> Result<MediaInfo, Error> {
         return Err(Error::Format("unsupported audio extension"));
     }
     if ext == "wav" {
-        let (sample_rate, channels) = wav::probe_wav(path)?;
+        let (sample_rate, channels, duration_hns) = wav::probe_wav(path)?;
         return Ok(MediaInfo {
-            duration_hns: 0,
+            duration_hns,
             sample_rate,
             channels,
         });
@@ -233,6 +234,7 @@ impl MfReader {
                     channels,
                     kind: SampleKind::F32,
                 },
+                pending: Vec::new(),
             })
         }
     }
@@ -242,6 +244,7 @@ impl MfReader {
     }
 
     fn seek_hns(&mut self, hns: u64) -> Result<(), Error> {
+        self.pending.clear();
         let mut value = unsafe { std::mem::zeroed::<PROPVARIANT>() };
         unsafe {
             (*value.Anonymous.Anonymous).vt = windows::Win32::System::Variant::VT_I8;
@@ -253,59 +256,119 @@ impl MfReader {
     }
 
     fn read_block(&mut self, dst: &mut Vec<f32>, max_samples: usize) -> Result<usize, Error> {
-        let mut flags = 0u32;
-        let mut sample = None;
-        unsafe {
-            self.reader
-                .ReadSample(
-                    MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32,
-                    0,
-                    None,
-                    Some(&mut flags as *mut u32),
-                    None,
-                    Some(&mut sample),
-                )
-                .map_err(|_| Error::Format("decode failed"))?;
-            if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-                return Ok(0);
+        dst.clear();
+        if max_samples == 0 {
+            return Ok(0);
+        }
+        if !self.pending.is_empty() {
+            let take = max_samples.min(self.pending.len());
+            dst.extend(self.pending.drain(..take));
+            return Ok(dst.len());
+        }
+        loop {
+            let mut flags = 0u32;
+            let mut sample = None;
+            unsafe {
+                self.reader
+                    .ReadSample(
+                        MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32,
+                        0,
+                        None,
+                        Some(&mut flags as *mut u32),
+                        None,
+                        Some(&mut sample),
+                    )
+                    .map_err(|_| Error::Format("decode failed"))?;
+                if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                    return Ok(0);
+                }
+                let Some(sample) = sample else {
+                    continue;
+                };
+                let buffer = sample
+                    .ConvertToContiguousBuffer()
+                    .map_err(|_| Error::Format("audio buffer"))?;
+                let mut ptr = std::ptr::null_mut();
+                let mut current = 0u32;
+                buffer
+                    .Lock(&mut ptr, None, Some(&mut current))
+                    .map_err(|_| Error::Format("lock audio buffer"))?;
+                let bytes = std::slice::from_raw_parts(ptr, current as usize);
+                let samples = bytes
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect::<Vec<_>>();
+                let _ = buffer.Unlock();
+                if samples.is_empty() {
+                    continue;
+                }
+                let take = max_samples.min(samples.len());
+                dst.extend_from_slice(&samples[..take]);
+                if take < samples.len() {
+                    self.pending.extend_from_slice(&samples[take..]);
+                }
+                return Ok(dst.len());
             }
-            let Some(sample) = sample else {
-                return Ok(0);
-            };
-            let buffer = sample
-                .ConvertToContiguousBuffer()
-                .map_err(|_| Error::Format("audio buffer"))?;
-            let mut ptr = std::ptr::null_mut();
-            let mut current = 0u32;
-            buffer
-                .Lock(&mut ptr, None, Some(&mut current))
-                .map_err(|_| Error::Format("lock audio buffer"))?;
-            let bytes = std::slice::from_raw_parts(ptr, current as usize);
-            for chunk in bytes.chunks_exact(4).take(max_samples) {
-                dst.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-            }
-            let _ = buffer.Unlock();
-            Ok(dst.len())
         }
     }
 }
-/// 启动有界解码通道，首个音频块就绪后即可开始播放。
-pub fn stream_to_channel(path: PathBuf, looped: bool, cancel: Arc<AtomicBool>) -> Result<(MediaInfo, Receiver<crate::audio::sfx::StreamChunk>), Error> {
+/// 启动有界解码通道，首个音频块就绪后即可开始播放。`start_hns` 为起始位置（100 ns）。
+pub fn stream_to_channel(
+    path: PathBuf,
+    start_hns: u64,
+    looped: bool,
+    cancel: Arc<AtomicBool>,
+) -> Result<(MediaInfo, Receiver<crate::audio::sfx::StreamChunk>), Error> {
     let info = open(&path)?.info();
     let (tx, rx) = std::sync::mpsc::sync_channel(32);
-    thread::Builder::new().name("audio-stream-decode".into()).spawn(move || {
-        let Ok(mut reader) = open(&path) else { return; };
-        let mut block = Vec::with_capacity(16_384);
-        loop {
-            if cancel.load(Ordering::Acquire) { break; }
-            match reader.read_block(&mut block, 16_384) {
-                Ok(0) if looped => { let _ = reader.seek_hns(0); }
-                Ok(0) => { let _ = tx.send(crate::audio::sfx::StreamChunk { samples: Vec::new(), done: true }); break; }
-                Ok(n) => { if tx.send(crate::audio::sfx::StreamChunk { samples: block[..n].to_vec(), done: false }).is_err() { break; } }
-                Err(_) => { let _ = tx.send(crate::audio::sfx::StreamChunk { samples: Vec::new(), done: true }); break; }
+    thread::Builder::new()
+        .name("audio-stream-decode".into())
+        .spawn(move || {
+            let Ok(mut reader) = open(&path) else {
+                return;
+            };
+            if start_hns > 0 && reader.seek_hns(start_hns).is_err() {
+                // 跳转失败就从头放，总比整段没声音好。
+                tracing::warn!("seek to {start_hns} failed; playing from start");
             }
-        }
-    }).map_err(|_| Error::RenderInit("spawn audio stream"))?;
+            let mut block = Vec::with_capacity(16_384);
+            loop {
+                if cancel.load(Ordering::Acquire) {
+                    break;
+                }
+                match reader.read_block(&mut block, 16_384) {
+                    Ok(0) if looped => {
+                        let _ = reader.seek_hns(0);
+                    }
+                    Ok(0) => {
+                        let _ = tx.send(crate::audio::sfx::StreamChunk {
+                            samples: Vec::new(),
+                            done: true,
+                        });
+                        break;
+                    }
+                    Ok(n) => {
+                        if tx
+                            .send(crate::audio::sfx::StreamChunk {
+                                samples: block[..n].to_vec(),
+                                done: false,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        let _ = tx.send(crate::audio::sfx::StreamChunk {
+                            samples: Vec::new(),
+                            done: true,
+                        });
+                        break;
+                    }
+                }
+            }
+        })
+        .map_err(|_| Error::RenderInit("spawn audio stream"))?;
     Ok((info, rx))
 }
 

@@ -6,8 +6,7 @@ use windows::core::GUID;
 const WAVE_FORMAT_PCM: u16 = 1;
 const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
 const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
-const KSDATAFORMAT_SUBTYPE_PCM: GUID =
-    GUID::from_u128(0x0000_0001_0000_0010_8000_00aa_0038_9b71);
+const KSDATAFORMAT_SUBTYPE_PCM: GUID = GUID::from_u128(0x0000_0001_0000_0010_8000_00aa_0038_9b71);
 const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: GUID =
     GUID::from_u128(0x0000_0003_0000_0010_8000_00aa_0038_9b71);
 
@@ -66,7 +65,8 @@ impl AudioFormat {
                 _ => return None,
             },
             WAVE_FORMAT_EXTENSIBLE => {
-                if (fmt.cbSize as usize) < size_of::<WAVEFORMATEXTENSIBLE>() - size_of::<WAVEFORMATEX>()
+                if (fmt.cbSize as usize)
+                    < size_of::<WAVEFORMATEXTENSIBLE>() - size_of::<WAVEFORMATEX>()
                 {
                     return None;
                 }
@@ -120,26 +120,45 @@ impl Converter {
     pub fn convert_f32(&mut self, samples: &[f32], frames: usize, out: &mut Vec<f32>) {
         out.clear();
         self.decoded.clear();
-        self.decoded.extend_from_slice(&samples[..samples.len().min(frames.saturating_mul(self.src.channels as usize))]);
+        self.decoded.extend_from_slice(
+            &samples[..samples
+                .len()
+                .min(frames.saturating_mul(self.src.channels as usize))],
+        );
         self.mixed.clear();
-        mix_channels(&self.decoded, self.src.channels as usize, self.dst.channels as usize, &mut self.mixed);
-        if self.src.sample_rate == self.dst.sample_rate { out.extend_from_slice(&self.mixed); return; }
+        mix_channels(
+            &self.decoded,
+            self.src.channels as usize,
+            self.dst.channels as usize,
+            &mut self.mixed,
+        );
+        if self.src.sample_rate == self.dst.sample_rate {
+            out.extend_from_slice(&self.mixed);
+            return;
+        }
         self.hold.extend_from_slice(&self.mixed);
         let dst_ch = self.dst.channels as usize;
         let src_frames = self.hold.len() / dst_ch;
-        if src_frames < 2 { return; }
+        if src_frames < 2 {
+            return;
+        }
         let step = f64::from(self.src.sample_rate) / f64::from(self.dst.sample_rate);
         while self.pos + 1.0 < src_frames as f64 {
             let i = self.pos.floor() as usize;
             let frac = (self.pos - i as f64) as f32;
             let a = i * dst_ch;
             let b = (i + 1) * dst_ch;
-            for ch in 0..dst_ch { out.push(self.hold[a + ch] * (1.0 - frac) + self.hold[b + ch] * frac); }
+            for ch in 0..dst_ch {
+                out.push(self.hold[a + ch] * (1.0 - frac) + self.hold[b + ch] * frac);
+            }
             self.pos += step;
         }
         let drop_frames = self.pos.floor() as usize;
         let drop = drop_frames.min(src_frames.saturating_sub(1)) * dst_ch;
-        if drop > 0 { self.hold.drain(..drop); self.pos -= drop_frames.min(src_frames.saturating_sub(1)) as f64; }
+        if drop > 0 {
+            self.hold.drain(..drop);
+            self.pos -= drop_frames.min(src_frames.saturating_sub(1)) as f64;
+        }
     }
     /// 预分配 decode/mix 缓冲，避免音频循环扩容。
     pub fn new(src: AudioFormat, dst: AudioFormat) -> Self {
@@ -214,7 +233,11 @@ impl Converter {
 fn decode_to_f32(bytes: &[u8], frames: usize, fmt: AudioFormat, out: &mut Vec<f32>) {
     let ch = fmt.channels as usize;
     let need = frames * fmt.frame_bytes();
-    let bytes = if bytes.len() < need { bytes } else { &bytes[..need] };
+    let bytes = if bytes.len() < need {
+        bytes
+    } else {
+        &bytes[..need]
+    };
     let frames = bytes.len() / fmt.frame_bytes();
     out.reserve(frames * ch);
     match fmt.kind {
